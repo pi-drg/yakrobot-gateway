@@ -1,0 +1,9 @@
+# Per-agent MCP tokens for the gateway (used when MCP_TOKENS_FILE points here).
+# One `client_id=token` per line. Blank lines and `#` comments are ignored.
+# Edits take effect on the next request — no gateway restart needed.
+#
+# Copy to a real file (e.g. mcp-tokens.txt), give each agent a long random token,
+# and keep it out of git. Revoke an agent by deleting its line.
+
+marketplace=replace-with-a-long-random-secret
+teleop-ui=replace-with-another-long-random-secret

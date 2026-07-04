@@ -1,0 +1,36 @@
+[project]
+name = "yakrobot-gateway"
+version = "0.1.0"
+description = "Robot controller: per-robot MCP control + local fleet discovery + per-robot reservation. Transport-agnostic — MCP today, CLI/skills robots later. Auctions/marketplace live in yakrobot-marketplace."
+readme = "README.md"
+requires-python = ">=3.13"
+
+dependencies = [
+    "fastmcp>=2.14.5",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "pyngrok>=7.5.0",
+    "python-dotenv>=1.2.1",
+]
+
+[project.optional-dependencies]
+tumbller = ["httpx>=0.28.1"]
+tello = ["djitellopy>=2.5.0"]
+fakerobot = ["httpx>=0.28.1"]
+# Export a robot's metadata as a JSON RobotDescriptor (scripts/export_descriptor.py).
+# On-chain registration itself happens in yakrobot-identity, fed that JSON — this
+# gateway only produces the descriptor and holds no chain code.
+export = ["yakrobot-descriptor[model]"]
+all = ["httpx>=0.28.1", "djitellopy>=2.5.0"]
+# Tests use the fakerobot plugin (httpx) and the descriptor exporter (Pydantic model).
+dev = ["pytest>=8.0", "httpx>=0.28.1", "yakrobot-descriptor[model]"]
+
+[tool.uv]
+prerelease = "allow"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+yakrobot-descriptor = { path = "../yakrobot-descriptor", editable = true }
