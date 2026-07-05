@@ -39,11 +39,20 @@ Tool naming: `{robot_prefix}_{action}` (e.g. `tumbller_move`).
 
 ## Common commands
 
+Manage the gateway with the `yakrobot-py` CLI (Typer-based; `uv run yakrobot-py --help`,
+or `uv tool install --editable .` for a global `yakrobot-py`):
+
 ```bash
-uv sync --extra fakerobot                 # serve-only deps + fake robot (no chain)
-uv run python scripts/serve.py --robots fakerobot            # serve one robot
-uv run python scripts/serve.py --robots tumbller --ngrok     # with tunnel
+uv sync --extra fakerobot                          # serve-only deps + fake robot (no chain)
+uv run yakrobot-py robots                           # list available robot plugins
+uv run yakrobot-py serve --robots fakerobot         # serve one robot
+uv run yakrobot-py serve --robots tumbller --tunnel ngrok   # with a public tunnel
+uv run yakrobot-py status                           # inspect a running gateway (mounts + reservations)
+uv run yakrobot-py sim                              # start the hardware-free fakerobot simulator (:8080)
 ```
+
+The legacy `uv run python scripts/serve.py …` entrypoint still works — it forwards to the
+same implementation.
 
 ### Exporting a robot descriptor (for on-chain registration elsewhere)
 
@@ -52,7 +61,7 @@ as JSON here*, then register it from `yakrobot-identity`:
 
 ```bash
 uv sync --extra export
-uv run python scripts/export_descriptor.py tumbller --ngrok-domain $NGROK_DOMAIN
+uv run yakrobot-py export tumbller   # --public-domain defaults from $NGROK_DOMAIN / $CLOUDFLARE_DOMAIN
 # writes robot-descriptors/tumbller.json (a gitignored, regenerable artifact); then:
 cd ../yakrobot-identity
 uv run python scripts/register.py --descriptor ../yakrobot-gateway/robot-descriptors/tumbller.json --chain base-sepolia

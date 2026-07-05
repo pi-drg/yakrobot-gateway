@@ -80,27 +80,35 @@ Tool naming convention: `{robot_prefix}_{action}` (e.g. `tumbller_move`, `tello_
 
 ## Common Commands
 
+The gateway is managed with the **`yakrobot-py`** CLI (Typer-based; defined in
+`src/yakrobot_cli/`, registered as a `[project.scripts]` console script). Run it via
+`uv run yakrobot-py …`, or `uv tool install --editable .` for a bare `yakrobot-py`. The
+`scripts/serve.py` / `scripts/export_descriptor.py` entrypoints still work — they forward
+to the same implementation in `src/yakrobot_cli/commands.py` (one source of truth).
+
 ```bash
 # Install dependencies (serve-only; no chain deps)
-uv sync                        # Core only
+uv sync                        # Core only (includes the yakrobot-py CLI)
 uv sync --extra tumbller       # With Tumbller support
 uv sync --extra fakerobot      # With fake robot (no hardware needed)
 uv sync --extra all            # All robots
 
-# Serve robots
-uv run python scripts/serve.py                                  # All robots, no tunnel
-uv run python scripts/serve.py --tunnel ngrok                   # All robots via ngrok
-uv run python scripts/serve.py --tunnel cloudflare              # ...or via Cloudflare Tunnel
-uv run python scripts/serve.py --robots tumbller --tunnel ngrok # Single robot
+# Discover + serve robots
+uv run yakrobot-py robots                                  # List available robot plugins
+uv run yakrobot-py serve                                   # All robots, no tunnel
+uv run yakrobot-py serve --tunnel ngrok                    # All robots via ngrok
+uv run yakrobot-py serve --tunnel cloudflare               # ...or via Cloudflare Tunnel
+uv run yakrobot-py serve --robots tumbller --tunnel ngrok  # Single robot
+uv run yakrobot-py status                                  # Inspect a running gateway (mounts + reservations)
 
 # Fake robot (hardware-free development)
-uv run python -m plugins.fakerobot.simulator                     # Start simulator on :8080
-uv run python scripts/serve.py --robots fakerobot                # Gateway for fake robot
+uv run yakrobot-py sim                                     # Start simulator on :8080
+uv run yakrobot-py serve --robots fakerobot                # Gateway for fake robot
 
 # Export a robot's JSON descriptor (needs the `export` extra), then register from
 # yakrobot-identity — no chain code runs here.
 uv sync --extra export
-uv run python scripts/export_descriptor.py tumbller --public-domain $NGROK_DOMAIN
+uv run yakrobot-py export tumbller     # --public-domain defaults from $NGROK_DOMAIN / $CLOUDFLARE_DOMAIN
 # writes robot-descriptors/tumbller.json (gitignored artifact; source of truth = metadata())
 # then, in ../yakrobot-identity:
 #   uv run python scripts/register.py --descriptor ../yakrobot-gateway/robot-descriptors/tumbller.json
@@ -112,10 +120,11 @@ uv run python scripts/export_descriptor.py tumbller --public-domain $NGROK_DOMAI
 
 Serving:
 - `TUNNEL_PROVIDER` — (optional) public tunnel provider: `ngrok` (default) or `cloudflare`;
-  `serve.py --tunnel {ngrok,cloudflare}` overrides it (`--ngrok` is a deprecated alias).
+  `yakrobot-py serve --tunnel {ngrok,cloudflare}` overrides it.
 - `NGROK_AUTHTOKEN` — ngrok auth token (required for the ngrok tunnel)
-- `NGROK_DOMAIN` — ngrok static domain (also passed to `export_descriptor.py --public-domain`
-  to resolve the descriptor's public endpoints)
+- `NGROK_DOMAIN` — ngrok static domain (also the default for `yakrobot-py export`'s
+  `--public-domain`, which resolves the descriptor's public endpoints; `CLOUDFLARE_DOMAIN`
+  is the fallback)
 - Cloudflare Tunnel (`--tunnel cloudflare`) needs the `cloudflared` binary on PATH. Set
   `CLOUDFLARE_TUNNEL_TOKEN` + `CLOUDFLARE_DOMAIN` for a stable named tunnel (its dashboard
   ingress must point at `http://localhost:<port>`); omit both for an ephemeral
