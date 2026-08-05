@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tumbller = ["httpx>=0.28.1"]
+picar-freenove = ["httpx>=0.28.1"]
 tello = ["djitellopy>=2.5.0"]
 fakerobot = ["httpx>=0.28.1"]
 # Export a robot's metadata as a JSON RobotDescriptor (scripts/export_descriptor.py).

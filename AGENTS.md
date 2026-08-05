@@ -39,7 +39,7 @@ yakrobot-gateway/
 │   │   ├── plugin.py      # RobotPlugin base + RobotMetadata
 │   │   └── descriptor.py  # build_descriptor: plugin metadata → RobotDescriptor (export extra)
 │   └── plugins/           # One sub-package per robot (device-neutral; IoT/printers later)
-│       ├── tumbller/  tello/  fakerobot/  _template/
+│       ├── tumbller/  tello/  fakerobot/  picar_freenove/  _template/
 └── scripts/               # serve.py + export_descriptor.py (emits the JSON contract)
 ```
 
@@ -90,6 +90,7 @@ to the same implementation in `src/yakrobot_cli/commands.py` (one source of trut
 # Install dependencies (serve-only; no chain deps)
 uv sync                        # Core only (includes the yakrobot-py CLI)
 uv sync --extra tumbller       # With Tumbller support
+uv sync --extra picar-freenove # With Freenove 4WD PiCar support
 uv sync --extra fakerobot      # With fake robot (no hardware needed)
 uv sync --extra all            # All robots
 
@@ -133,6 +134,9 @@ Serving:
   file variant hot-reloads (add/revoke agents without restart). Needed for reservations to
   distinguish callers. `MCP_BEARER_TOKEN` — (optional) single shared token (legacy).
 - `TUMBLLER_URL` / `TELLO_HOST` / `FAKEROBOT_URL` — (optional) robot addresses
+- `PICAR_FREENOVE_URL` — (optional) PiCar address, default
+  `http://picar-freenove.local:8080`. `PICAR_FREENOVE_TOKEN` — bearer token, only
+  if the car runs with `ROBOT_TOKEN` set; omit when the robot has auth disabled.
 - Payments/marketplace secrets (Stripe, …) live in `yakrobot-marketplace`, not here.
 
 On-chain registration secrets (`SIGNER_PVT_KEY`, `PINATA_JWT`, `RPC_URL`, …) are **not

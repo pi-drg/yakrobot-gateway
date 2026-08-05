@@ -1484,6 +1484,9 @@ export = [
 fakerobot = [
     { name = "httpx" },
 ]
+picar-freenove = [
+    { name = "httpx" },
+]
 tello = [
     { name = "djitellopy" },
 ]
@@ -1500,6 +1503,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'all'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'fakerobot'", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'picar-freenove'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'tumbller'", specifier = ">=0.28.1" },
     { name = "pyngrok", specifier = ">=7.5.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -1509,4 +1513,4 @@ requires-dist = [
     { name = "yakrobot-descriptor", extras = ["model"], marker = "extra == 'dev'", editable = "../yakrobot-descriptor" },
     { name = "yakrobot-descriptor", extras = ["model"], marker = "extra == 'export'", editable = "../yakrobot-descriptor" },
 ]
-provides-extras = ["tumbller", "tello", "fakerobot", "export", "all", "dev"]
+provides-extras = ["tumbller", "picar-freenove", "tello", "fakerobot", "export", "all", "dev"]
