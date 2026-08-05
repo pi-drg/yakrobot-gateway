@@ -1,0 +1,66 @@
+"""PiCar Freenove — Freenove 4WD Smart Car on a Raspberry Pi, over MCP.
+
+The car runs `picar_freenove_fastapi` (github.com/pi-drg/picar_freenove_fastapi),
+which exposes an HTTP control surface on the Pi itself. This plugin adapts that
+surface to MCP tools; the gateway runs off-board and reaches the car over the
+network.
+
+Point it at your car with `PICAR_FREENOVE_URL` (default
+`http://picar-freenove.local:8080`), and set `PICAR_FREENOVE_TOKEN` if the robot
+is running with `ROBOT_TOKEN` configured.
+
+Naming: the package directory must be an importable Python module, so it is
+`picar_freenove` with an underscore, and `url_prefix` matches it because the
+gateway mounts each robot at `/{plugin_name}/mcp` — a mismatch would make the
+exported descriptor advertise an endpoint that 404s.
+"""
+
+from core.plugin import RobotPlugin, RobotMetadata
+
+
+class PicarFreenovePlugin(RobotPlugin):
+    def metadata(self) -> RobotMetadata:
+        return RobotMetadata(
+            name="PiCar-Freenove",
+            description=(
+                "A Freenove 4WD Smart Car on a Raspberry Pi: drive and strafe, "
+                "pan/tilt camera with snapshots, ultrasonic distance and sweep, "
+                "infrared line sensors, battery telemetry and an addressable "
+                "LED ring."
+            ),
+            # Mecanum-equipped cars are holonomic, but the same plugin serves
+            # cars with ordinary wheels, so the broader classification is the
+            # honest one. picar_freenove_capabilities reports the actual build.
+            robot_type="mobile_robot",
+            url_prefix="picar_freenove",
+            fleet_provider="yakrobot",
+            fleet_domain="yakrobot.com/finland",
+            # Not participating in the task marketplace. Enabling it means
+            # setting BiddingTerms here and implementing bid()/execute() — both
+            # are commercial decisions (what tasks, at what price), not
+            # something to infer from the hardware.
+            bidding_terms=None,
+        )
+
+    def tool_names(self) -> list[str]:
+        return [
+            "picar_freenove_is_online",
+            "picar_freenove_capabilities",
+            "picar_freenove_battery",
+            "picar_freenove_drive",
+            "picar_freenove_move",
+            "picar_freenove_stop",
+            "picar_freenove_look",
+            "picar_freenove_distance",
+            "picar_freenove_scan",
+            "picar_freenove_line",
+            "picar_freenove_snapshot",
+            "picar_freenove_led",
+        ]
+
+    def register_tools(self, mcp):
+        from .robot_adapter import PicarFreenoveAdapter
+        from .mcp_tools import register
+
+        self.adapter = PicarFreenoveAdapter()
+        register(mcp, self.adapter)
