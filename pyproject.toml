@@ -9,6 +9,7 @@ dependencies = [
     "fastmcp>=2.14.5",
     "fastapi>=0.115.0",
     "uvicorn>=0.34.0",
+    "websockets>=14.0",
     "pyngrok>=7.5.0",
     "python-dotenv>=1.2.1",
     "typer>=0.12.0",
@@ -19,13 +20,22 @@ tumbller = ["httpx>=0.28.1"]
 picar-freenove = ["httpx>=0.28.1"]
 tello = ["djitellopy>=2.5.0"]
 fakerobot = ["httpx>=0.28.1"]
+# The simulator renders real JPEG frames for its /ws/video stream.
+fakerobot-picar = ["httpx>=0.28.1", "pillow>=11.0", "numpy>=2.0"]
 # Export a robot's metadata as a JSON RobotDescriptor (scripts/export_descriptor.py).
 # On-chain registration itself happens in yakrobot-identity, fed that JSON — this
 # gateway only produces the descriptor and holds no chain code.
 export = ["yakrobot-descriptor[model]"]
-all = ["httpx>=0.28.1", "djitellopy>=2.5.0"]
-# Tests use the fakerobot plugin (httpx) and the descriptor exporter (Pydantic model).
-dev = ["pytest>=8.0", "httpx>=0.28.1", "yakrobot-descriptor[model]"]
+all = ["httpx>=0.28.1", "djitellopy>=2.5.0", "pillow>=11.0", "numpy>=2.0"]
+# Tests use the fakerobot plugins (httpx, and pillow/numpy for the PiCar
+# simulator's video stream) and the descriptor exporter (Pydantic model).
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.28.1",
+    "pillow>=11.0",
+    "numpy>=2.0",
+    "yakrobot-descriptor[model]",
+]
 
 [project.scripts]
 # Management CLI for the gateway (serve / robots / status / export / sim).

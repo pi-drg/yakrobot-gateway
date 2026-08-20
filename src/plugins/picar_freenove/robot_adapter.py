@@ -17,6 +17,8 @@ Two things this adapter owns, so the MCP layer above stays declarative:
 """
 
 import os
+import socket
+from urllib.parse import urlparse
 
 import httpx
 
@@ -25,6 +27,64 @@ import httpx
 # nudge rather than a journey. Callers wanting more issue repeated moves.
 MAX_DURATION_MS = 3000
 MAX_DUTY = 4095
+
+DEFAULT_BASE_URL = "http://picar-freenove.local:8080"
+
+
+def control_base_urls() -> list[str]:
+    """Candidate URLs for the car's control server, in preference order.
+
+    ``PICAR_FREENOVE_URL`` may hold a **comma-separated list**, so a unit can be
+    named both ways at once:
+
+        PICAR_FREENOVE_URL=http://picar-finland-01.local:8080,http://192.168.8.201:8080
+
+    Neither form is reliable alone — the mDNS name survives the DHCP lease
+    moving but needs a working resolver; the IP needs no resolver but goes
+    stale when the lease moves. Listing both means whichever is true today
+    wins. A single URL (the common case) is just a one-element list.
+
+    One source of truth for this adapter and the gateway's WebSocket proxy
+    (``core.ws_proxy``) — they must agree on which car they are talking to, and
+    a second ``os.getenv`` with its own default is how that quietly stops being
+    true.
+    """
+    raw = os.getenv("PICAR_FREENOVE_URL", DEFAULT_BASE_URL)
+    urls = [u.strip().rstrip("/") for u in raw.split(",")]
+    return [u for u in urls if u] or [DEFAULT_BASE_URL]
+
+
+def control_base_url() -> str:
+    """The single URL this adapter's HTTP client should use.
+
+    httpx has no multi-host failover, so the choice is made once here: the first
+    candidate whose hostname actually resolves. That covers the case this exists
+    for — an mDNS name listed first on a host with no working resolver falls
+    through to the IP — without paying a reachability probe on every call.
+
+    Resolution is not reachability: a name that resolves to a stale address is
+    still chosen. The candidate list fixes naming, not a car that is switched
+    off.
+    """
+    candidates = control_base_urls()
+    for url in candidates:
+        host = urlparse(url).hostname
+        if not host:
+            continue
+        try:
+            socket.getaddrinfo(host, None)
+        except OSError:
+            continue
+        return url
+    return candidates[0]
+
+
+def control_token() -> str:
+    """Bearer token for the car, or "" when it runs with auth disabled.
+
+    Empty is the normal state on a trusted LAN (the robot's ROBOT_TOKEN unset).
+    """
+    return os.getenv("PICAR_FREENOVE_TOKEN", "")
 
 
 def clamp_duration(ms: int) -> int:
@@ -40,11 +100,10 @@ class PicarFreenoveAdapter:
 
     def __init__(self, base_url: str | None = None, token: str | None = None,
                  timeout: float = 8.0):
-        self.base_url = base_url or os.getenv(
-            "PICAR_FREENOVE_URL", "http://picar-freenove.local:8080")
+        self.base_url = base_url or control_base_url()
         # Set PICAR_FREENOVE_TOKEN when the robot runs with ROBOT_TOKEN configured.
         # Absent means the robot has auth disabled — only sane on a trusted LAN.
-        token = token if token is not None else os.getenv("PICAR_FREENOVE_TOKEN", "")
+        token = token if token is not None else control_token()
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         self.client = httpx.AsyncClient(
             base_url=self.base_url, timeout=timeout, headers=headers
@@ -157,8 +216,24 @@ class PicarFreenoveAdapter:
     async def battery(self) -> dict:
         return await self.get("/battery")
 
-    async def snapshot(self) -> dict:
-        return await self.get("/snapshot")
+    async def snapshot_bytes(self) -> bytes:
+        """One camera frame, as raw JPEG bytes.
+
+        /snapshot returns raw bytes on the wire, not the JSON _request() expects
+        — a plain `curl` or browser needs nothing extra that way. Raises instead
+        of returning {"ok": False, ...} like the other methods, because the
+        caller (picar_freenove_snapshot) returns an MCP Image, which has no room
+        for an error dict; FastMCP turns a raised exception into a clean tool
+        error the agent sees as a failure message, not a crash.
+        """
+        try:
+            resp = await self.client.get("/snapshot")
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                f"cannot reach the robot at {self.base_url}: {exc}") from exc
+        if resp.is_error:
+            raise RuntimeError(f"robot returned {resp.status_code}: {resp.text}")
+        return resp.content
 
     # --- lights --------------------------------------------------------------
 

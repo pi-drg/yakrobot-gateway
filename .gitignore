@@ -11,6 +11,10 @@ wheels/
 
 # Secrets
 .env
+# Backups of a real .env carry the same live tokens the original does — a
+# dated copy left in the tree must never become a commit.
+.env.*
+!.env.example
 # Real MCP token files (keep mcp-tokens.example.txt tracked, ignore actual secrets)
 mcp-tokens.txt
 *.tokens

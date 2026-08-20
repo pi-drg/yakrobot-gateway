@@ -1,0 +1,953 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Drive picar-finland-01</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+  rel="stylesheet" />
+<style>
+  /* Brand tokens lifted from yakrobot.com so this console matches the site. */
+  :root {
+    --primary: #0064ff;
+    --primary-pressed: #004fcc;
+    --primary-light-bg: #e6efff;
+    --on-primary: #ffffff;
+
+    --secondary: #0f6e56;
+    --secondary-light-bg: #e1f5ee;
+
+    --accent: #d85a30;
+    --accent-bg: #faece7;
+
+    --canvas: #f9f8f5;
+    --surface-white: #ffffff;
+    --surface-muted: #f3f4f6;
+    --hairline: #e5e7eb;
+
+    --ink-dark: #2c2c2a;
+    --ink-secondary: #5f5e5a;
+
+    --font-serif: "Instrument Serif", Georgia, serif;
+    --font-sans: "Outfit", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Courier New", monospace;
+
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-pill: 9999px;
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  }
+
+  * { box-sizing: border-box; }
+  html { overscroll-behavior: none; }
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink-dark);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+  }
+
+  .eyebrow {
+    font-size: 12px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-secondary);
+  }
+
+  /* Numerals are monospaced and fixed-width everywhere: a readout that
+     reflows as digits change is a readout you misread at a glance. */
+  .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: center; gap: 12px 20px; flex-wrap: wrap;
+    padding: 12px 20px;
+    background: var(--surface-white);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .ident { display: flex; flex-direction: column; line-height: 1.2; }
+  .ident .name { font-family: var(--font-serif); font-size: 22px; }
+  .ident .build { font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+                  color: var(--ink-secondary); }
+
+  .link {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-pill);
+    background: var(--surface-muted);
+  }
+  .lamp { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-secondary); }
+  .link[data-state="live"]     .lamp { background: var(--secondary); }
+  .link[data-state="degraded"] .lamp { background: var(--accent); }
+  .link[data-state="down"]     .lamp { background: var(--accent); }
+  .link .state { font-size: 12px; font-weight: 600; letter-spacing: .08em;
+                 text-transform: uppercase; }
+  .link .rtt { font-size: 13px; color: var(--ink-secondary); }
+  .link .rtt b { color: var(--ink-dark); font-weight: 500; }
+
+  .stop {
+    font-family: var(--font-sans); font-weight: 600; font-size: 16px;
+    color: var(--on-primary); background: var(--accent);
+    border: 1px solid transparent; border-radius: var(--radius-md);
+    padding: 11px 26px; cursor: pointer; flex: none;
+    display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+    transition: background .15s ease, transform .05s ease;
+  }
+  .stop:hover { background: #bf4a24; }
+  .stop:active { transform: translateY(1px); }
+  .stop kbd {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em;
+    background: rgb(255 255 255 / .22); border-radius: 4px; padding: 2px 6px;
+  }
+
+  /* ---------- layout ---------- */
+  main {
+    flex: 1; min-height: 0;
+    display: grid; grid-template-columns: minmax(0, 1fr) 264px;
+    gap: 16px; padding: 16px 20px;
+  }
+
+  .screen {
+    position: relative;
+    background: #14161a;                       /* dark bezel: the only dark surface */
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%;
+    aspect-ratio: 4 / 3;                       /* the camera's own ratio */
+  }
+  @media (min-width: 861px) {
+    /* Wide enough to fill the column instead: let flex give it the height. */
+    .screen { aspect-ratio: auto; flex: 1; min-height: 0; }
+  }
+  .screen img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .screen img.stale { filter: saturate(.35) brightness(.6); }
+  .placeholder { color: #7d838c; font-family: var(--font-mono); font-size: 13px; }
+
+  .veil {
+    position: absolute; inset: 0; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px; text-align: center; padding: 24px;
+    background: repeating-linear-gradient(45deg,
+      rgb(216 90 48 / .16) 0 12px, rgb(216 90 48 / .05) 12px 24px);
+    border: 3px solid var(--accent); border-radius: var(--radius-lg);
+    color: #fff;
+  }
+  .veil.on { display: flex; }
+  .veil h2 { margin: 0; font-family: var(--font-serif); font-size: 30px; font-weight: 400; }
+  .veil p  { margin: 0; font-size: 14px; max-width: 34ch; }
+  .veil .why { font-family: var(--font-mono); font-size: 12px; opacity: .8; margin-top: 6px; }
+
+  .camoff {
+    position: absolute; inset: 0; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; text-align: center; padding: 20px; color: #cfd5dc;
+  }
+  .camoff.on { display: flex; }
+  .camoff h2 { font-family: var(--font-serif); font-weight: 400; font-size: 26px; margin: 0; }
+  .camoff p { margin: 0; font-size: 13px; max-width: 34ch; color: #9aa2ab; }
+  .screen.off { border: 2px dashed #3a4048; }
+
+  .proximity {
+    position: absolute; left: 12px; bottom: 12px; display: none;
+    padding: 6px 12px; border-radius: var(--radius-pill);
+    background: var(--accent); color: #fff;
+    font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .proximity.on { display: block; }
+
+  /* ---------- signature: latency tape ---------- */
+  .gauge {
+    width: 74px; height: 6px; flex: none;
+    border-radius: 3px; overflow: hidden; background: var(--hairline);
+  }
+  .gauge span {
+    display: block; height: 100%; width: 0; border-radius: 3px;
+    background: var(--secondary);
+    transition: width .35s ease, background .35s ease;
+  }
+
+  /* ---------- instruments ---------- */
+  aside { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .card {
+    background: var(--surface-white); border: 1px solid var(--hairline);
+    border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm);
+  }
+  .card .label { display: block; font-size: 11px; font-weight: 600;
+                 letter-spacing: .12em; text-transform: uppercase;
+                 color: var(--ink-secondary); }
+  .card .val { font-size: 26px; line-height: 1.15; }
+  .card .val i { font-style: normal; font-size: 13px; color: var(--ink-secondary);
+                 margin-left: 3px; }
+  .card.alarm { border-color: var(--accent); background: var(--accent-bg); }
+  .card.alarm .val { color: var(--accent); }
+
+  .meter { height: 4px; background: var(--surface-muted); border-radius: 2px;
+           overflow: hidden; margin-top: 8px; }
+  .meter span { display: block; height: 100%; width: 0; background: var(--secondary);
+                transition: width .3s ease; }
+  .card.alarm .meter span { background: var(--accent); }
+
+  .pair { display: flex; gap: 18px; }
+
+  input[type=range] { width: 100%; accent-color: var(--primary); margin: 8px 0 0;
+                      font-size: 16px; touch-action: manipulation; }
+  .hint { margin: 6px 0 0; font-size: 11px; color: var(--ink-secondary); }
+
+  .ghost {
+    font-family: var(--font-sans); font-weight: 500; font-size: 14px;
+    background: transparent; color: var(--primary);
+    border: 1px solid var(--primary); border-radius: var(--radius-md);
+    padding: 9px 16px; cursor: pointer; transition: background .15s ease;
+  }
+  .ghost:hover { background: var(--primary-light-bg); }
+
+  /* ---------- command echo ---------- */
+  footer {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 20px; background: var(--surface-white);
+    border-top: 1px solid var(--hairline);
+  }
+  .keys { display: flex; gap: 5px; }
+  .keys kbd {
+    font-family: var(--font-mono); font-size: 12px; min-width: 26px;
+    text-align: center; padding: 5px 7px;
+    border: 1px solid var(--hairline); border-radius: 5px;
+    background: var(--surface-muted); color: var(--ink-secondary);
+  }
+  .keys kbd.on { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .vec { display: flex; gap: 16px; margin-left: auto; align-items: center; }
+  .vec span { font-size: 13px; color: var(--ink-secondary); }
+  .vec b { font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+           color: var(--ink-dark); font-weight: 500; margin-left: 5px; }
+  .tag {
+    font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    padding: 4px 12px; border-radius: var(--radius-pill);
+    background: var(--surface-muted); color: var(--ink-secondary);
+  }
+  .tag.moving { background: var(--primary-light-bg); color: var(--primary); }
+  .tag.blocked { background: var(--accent-bg); color: var(--accent); }
+
+  /* ---------- help ---------- */
+  dialog {
+    border: 1px solid var(--hairline); border-radius: var(--radius-lg);
+    padding: 0; max-width: 560px; width: calc(100% - 40px);
+    box-shadow: var(--shadow); color: var(--ink-dark);
+  }
+  dialog::backdrop { background: rgb(44 44 42 / .4); }
+  dialog .body { padding: 24px 26px; }
+  dialog h2 { font-family: var(--font-serif); font-weight: 400; font-size: 28px;
+              margin: 0 0 6px; }
+  dialog .lede { margin: 0 0 16px; color: var(--ink-secondary); }
+  dialog table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
+  dialog td, dialog th { text-align: left; padding: 6px 0; border-bottom: 1px solid var(--hairline);
+                         font-weight: 400; vertical-align: top; }
+  dialog th { width: 44%; }
+  dialog kbd {
+    font-family: var(--font-mono); font-size: 12px; padding: 2px 6px; margin-right: 3px;
+    border: 1px solid var(--hairline); border-radius: 4px; background: var(--surface-muted);
+  }
+  dialog h3 { font-size: 13px; font-weight: 600; letter-spacing: .1em;
+              text-transform: uppercase; color: var(--ink-secondary); margin: 0 0 8px; }
+  dialog ul { margin: 0 0 20px; padding-left: 18px; }
+  dialog li { margin-bottom: 7px; }
+
+  /* ---------- touch controls ---------- */
+  /* Hidden on a mouse, shown on any coarse pointer or narrow screen, and
+     forceable from the sidebar so a desktop can rehearse the phone layout. */
+  .pad { display: none; }
+  @media (pointer: coarse), (max-width: 860px) { .pad { display: flex; } }
+  body.show-pad .pad { display: flex; }
+
+  .pad {
+    gap: 18px; justify-content: center; align-items: flex-end; flex-wrap: wrap;
+    padding: 14px 20px calc(18px + env(safe-area-inset-bottom));
+    background: var(--surface-white); border-top: 1px solid var(--hairline);
+    touch-action: none;                 /* no scroll or pinch while driving */
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .cluster { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .pad-right { display: flex; gap: 18px; align-items: flex-end; }
+  .cluster .label {
+    font-size: 10px; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--ink-secondary);
+  }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+
+  .pad button {
+    -webkit-tap-highlight-color: transparent;
+    width: 58px; height: 52px;          /* comfortably over the 44px minimum */
+    font-family: var(--font-sans); font-size: 19px; line-height: 1;
+    color: var(--ink-dark); background: var(--surface-muted);
+    border: 1px solid var(--hairline); border-radius: var(--radius-md);
+    cursor: pointer; touch-action: none;
+  }
+  .pad button.on { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .pad button:disabled { opacity: .3; cursor: not-allowed; }
+  .pad .halt {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+    font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  }
+  .pad .spacer { visibility: hidden; }
+
+  :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+  @media (max-width: 860px) {
+    main { display: block; padding: 10px 12px; }
+
+    /* Cap the picture so the controls stay on screen. Driving while scrolling
+       to find the pad is the failure this whole layout exists to avoid. */
+    .screen { max-height: 42dvh; }
+
+    /* Readouts become one thin strip, not a stack of cards. The numbers are
+       what matter at this size; the meters and big type are desktop luxuries. */
+    aside {
+      flex-direction: row; flex-wrap: wrap; align-items: center;
+      gap: 6px; margin-top: 8px;
+    }
+    .card {
+      flex: 1 1 auto; display: flex; align-items: baseline; gap: 7px;
+      padding: 6px 10px; box-shadow: none;
+    }
+    .card .label { font-size: 9px; letter-spacing: .1em; }
+    .card .val { font-size: 15px; }
+    .card .val i { font-size: 10px; margin-left: 2px; }
+    .card .meter { display: none; }
+    .card .pair { gap: 10px; }
+    .card input[type=range] { margin: 0 0 0 4px; width: 90px; }
+    .card .hint { display: none; }
+    aside > button { flex: 0 0 auto; padding: 7px 12px; font-size: 12px; }
+
+    /* The pad belongs under the thumbs, below everything else. */
+    footer { order: 3; }
+    .pad { order: 4; }
+
+    /* Keyboard glyphs mean nothing on a touchscreen. */
+    footer .keys { display: none; }
+    footer { padding: 6px 12px; gap: 10px; }
+    .vec { margin-left: 0; gap: 12px; }
+    .vec span { font-size: 11px; }
+
+    /* The pad appears on its own here; the desktop toggle is just clutter. */
+    #padBtn { display: none; }
+  }
+  @media (max-width: 560px) {
+    header { gap: 10px 12px; padding: 10px 14px; }
+    .ident .name { font-size: 19px; }
+    /* STOP onto its own full-width row: on a phone it is the control most
+       likely to be needed in a hurry and the worst one to have to aim for. */
+    .stop { flex: 1 1 100%; }
+    .pad {
+      gap: 12px; padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+      align-items: flex-start; flex-wrap: nowrap;
+    }
+    .pad button { width: 44px; height: 44px; font-size: 16px; }
+    .cluster .label { font-size: 9px; }
+    .pad-right { flex-direction: column; gap: 8px; align-items: center; }
+    /* Camera collapses from a plus-shape to one row: the four spacers in that
+       3x3 cost more height than the arrows themselves. Recentre stays
+       available as the button in the readout strip. */
+    .cam .grid3 { display: flex; }
+    .cam .spacer, #padCentre { display: none; }
+    .screen { max-height: 34dvh; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="ident">
+    <span class="name" id="unit">picar-finland-01</span>
+    <span class="build" id="build">connecting</span>
+  </div>
+
+  <div class="link" id="link" data-state="down">
+    <span class="lamp"></span>
+    <span class="state num" id="linkState">offline</span>
+    <span class="gauge" aria-hidden="true"><span id="gaugeFill"></span></span>
+    <span class="rtt num"><b id="avg">———</b> ms avg</span>
+  </div>
+
+  <button class="stop" id="stopBtn" type="button">Stop <kbd>SPACE</kbd></button>
+</header>
+
+<main>
+  <section style="display:flex;flex-direction:column;min-height:0;">
+    <div class="screen" id="screen">
+      <div class="placeholder" id="placeholder">waiting for video…</div>
+      <img id="video" alt="Live view from the car" hidden />
+      <div class="veil" id="veil" role="status">
+        <h2>Link degraded</h2>
+        <p>This picture may be stale. The car may still be moving.</p>
+        <p class="why" id="veilWhy"></p>
+      </div>
+      <div class="camoff" id="camoff" role="status">
+        <h2>Camera off</h2>
+        <p>Not using bandwidth. The car still drives — range ahead is your only
+           remaining sense.</p>
+      </div>
+      <div class="proximity" id="prox" role="status">Obstacle <span id="proxCm"></span></div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card" id="battCard">
+      <span class="label">Battery</span>
+      <span class="val num"><b id="batt">—.——</b><i>V</i></span>
+      <div class="meter"><span id="battBar"></span></div>
+    </div>
+
+    <div class="card" id="rangeCard">
+      <span class="label">Range ahead</span>
+      <span class="val num"><b id="range">———</b><i>cm</i></span>
+      <div class="meter"><span id="rangeBar"></span></div>
+    </div>
+
+    <div class="card">
+      <span class="label">Camera</span>
+      <div class="pair">
+        <span class="val num" style="font-size:20px">
+          <b id="pan">90</b><i>pan</i></span>
+        <span class="val num" style="font-size:20px">
+          <b id="tilt">90</b><i>tilt</i></span>
+      </div>
+    </div>
+    <button class="ghost" id="recentre" type="button">Recentre camera</button>
+    <button class="ghost" id="videoBtn" type="button">Turn camera off</button>
+
+    <div class="card">
+      <label class="label" for="speed">Speed limit</label>
+      <span class="val num"><b id="speedVal">80</b><i>%</i></span>
+      <input id="speed" type="range" min="10" max="100" step="5" value="80" />
+      <p class="hint">Server clamps every duty to <b class="num" id="maxDuty">—</b>.</p>
+    </div>
+
+    <button class="ghost" id="padBtn" type="button">Touch controls</button>
+    <button class="ghost" id="helpBtn" type="button">Controls</button>
+  </aside>
+</main>
+
+<footer>
+  <div class="keys" id="keys"></div>
+  <div class="vec">
+    <span>vx<b id="vx">0</b></span>
+    <span id="vyWrap">vy<b id="vy">0</b></span>
+    <span>ω<b id="om">0</b></span>
+    <span class="tag" id="tag">idle</span>
+  </div>
+</footer>
+
+<section class="pad" id="pad">
+  <div class="cluster">
+    <div class="grid3">
+      <button data-intent="diagFL" aria-label="Forward left">&#8598;</button>
+      <button data-intent="fwd"    aria-label="Forward">&#8593;</button>
+      <button data-intent="diagFR" aria-label="Forward right">&#8599;</button>
+      <button data-intent="strafeL" aria-label="Strafe left">&#8592;</button>
+      <button class="halt" id="padStop" aria-label="Stop">STOP</button>
+      <button data-intent="strafeR" aria-label="Strafe right">&#8594;</button>
+      <button data-intent="diagBL" aria-label="Back left">&#8601;</button>
+      <button data-intent="back"   aria-label="Back">&#8595;</button>
+      <button data-intent="diagBR" aria-label="Back right">&#8600;</button>
+    </div>
+    <span class="label">Move</span>
+  </div>
+
+  <div class="pad-right">
+  <div class="cluster">
+    <div class="grid2">
+      <button data-intent="spinL" aria-label="Spin left">&#8634;</button>
+      <button data-intent="spinR" aria-label="Spin right">&#8635;</button>
+    </div>
+    <span class="label">Turn</span>
+  </div>
+
+  <div class="cluster cam">
+    <div class="grid3">
+      <button class="spacer" tabindex="-1" aria-hidden="true"></button>
+      <button data-arrow="ArrowUp" aria-label="Tilt camera up">&#9650;</button>
+      <button class="spacer" tabindex="-1" aria-hidden="true"></button>
+      <button data-arrow="ArrowLeft" aria-label="Pan camera left">&#9664;</button>
+      <button id="padCentre" aria-label="Recentre camera">&#8226;</button>
+      <button data-arrow="ArrowRight" aria-label="Pan camera right">&#9654;</button>
+      <button class="spacer" tabindex="-1" aria-hidden="true"></button>
+      <button data-arrow="ArrowDown" aria-label="Tilt camera toward the horizon">&#9660;</button>
+      <button class="spacer" tabindex="-1" aria-hidden="true"></button>
+    </div>
+    <span class="label">Camera</span>
+  </div>
+  </div>
+</section>
+
+<dialog id="help">
+  <div class="body">
+    <h2>Driving picar-finland-01</h2>
+    <p class="lede">The car stops itself when it stops hearing from you. Release
+      every key and it halts within the deadman window.</p>
+    <table>
+      <tr><th><kbd>W</kbd><kbd>S</kbd></th><td>Forward, back</td></tr>
+      <tr><th><kbd>A</kbd><kbd>D</kbd></th><td>Spin left, spin right</td></tr>
+      <tr><th><kbd>Ctrl</kbd>+<kbd>A</kbd> / <kbd>D</kbd></th><td>Strafe left, strafe right</td></tr>
+      <tr><th><kbd>Q</kbd><kbd>E</kbd></th><td>Diagonal forward-left, forward-right</td></tr>
+      <tr><th><kbd>Z</kbd><kbd>C</kbd></th><td>Diagonal back-left, back-right</td></tr>
+      <tr><th><kbd>↑</kbd><kbd>↓</kbd></th><td>Tilt camera up, back toward the horizon</td></tr>
+      <tr><th><kbd>←</kbd><kbd>→</kbd></th><td>Pan camera left, right</td></tr>
+      <tr><th><kbd>Space</kbd><kbd>Esc</kbd></th><td>Stop now</td></tr>
+    </table>
+    <h3>Worth knowing</h3>
+    <ul>
+      <li><b>The camera only looks up.</b> Tilt travels from the horizon upward —
+        this car cannot look down.</li>
+      <li><b>Diagonals work without Ctrl too.</b> <kbd>Ctrl</kbd>+<kbd>Q</kbd>
+        quits Firefox on Linux, which would drop your control link mid-drive.
+        Chromium is the safer browser for driving.</li>
+      <li><b>Switching tabs stops the car.</b> Losing focus clears every held key
+        and sends a stop.</li>
+      <li><b>One driver at a time.</b> A second browser sees the video but cannot
+        steer.</li>
+    </ul>
+    <button class="ghost" id="helpClose" type="button">Close</button>
+  </div>
+</dialog>
+
+<script>
+(() => {
+  "use strict";
+
+  // Works whether this page is served by the robot at "/" or proxied by the
+  // gateway at "/{robot}/ui" — the sockets are always resolved relative to
+  // wherever the page itself came from, so nothing hardcodes a host.
+  const base = location.pathname.replace(/\/+$/, "").replace(/\/ui$/, "");
+  const wsRoot = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base;
+
+  // A token in this page's own query string is forwarded to both sockets.
+  // Browsers cannot set headers on a WebSocket handshake, so ?token= is the
+  // only way in — which makes switching auth on a matter of sharing a
+  // different URL rather than editing this file.
+  const pageToken = new URLSearchParams(location.search).get("token");
+  const tokenQuery = pageToken ? "?token=" + encodeURIComponent(pageToken) : "";
+
+  const HEARTBEAT_MS = 150;     // re-arms the server deadman while a key is held
+  const PING_MS = 1000;
+  const RTT_DEGRADED_MS = 1500;
+  const MISSED_PONGS_DEGRADED = 2;
+  const LOOK_STEP = 3, LOOK_MS = 66, LOOK_MIN = 30, LOOK_MAX = 150;
+  const TAPE_N = 10;
+
+  const $ = id => document.getElementById(id);
+  const els = {};
+  for (const id of ["unit","build","link","linkState","stopBtn","screen","placeholder",
+                    "video","veil","veilWhy","prox","proxCm","gaugeFill","avg","batt","battBar",
+                    "battCard","range","rangeBar","rangeCard","pan","tilt","recentre","speed",
+                    "speedVal","maxDuty","helpBtn","help","helpClose","keys","vx","vy","om",
+                    "tag","vyWrap","videoBtn","camoff","pad","padStop","padCentre","padBtn"]) els[id] = $(id);
+
+  let cfg = { maxDuty: 1400, deadmanMs: 700, holonomic: true };
+  let control = null, degraded = false, isController = true;
+  let outstanding = 0, lastRtt = null;
+  const rtts = [];                          // null entries are missed pongs
+  let pan = 90, tilt = 90, lastSent = null;
+
+  // ---- key state ----------------------------------------------------------
+  const KEYS = ["w","a","s","d","q","e","z","c"];
+  const held = new Set();
+  const arrows = new Set();
+  let ctrlDown = false;
+
+  for (const k of [...KEYS, "ctrl"]) {
+    const kbd = document.createElement("kbd");
+    kbd.textContent = k === "ctrl" ? "ctrl" : k.toUpperCase();
+    kbd.dataset.key = k;
+    els.keys.appendChild(kbd);
+  }
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // Keyboard and touch both resolve to the same intent names, so there is one
+  // derivation, one heartbeat and one stop path regardless of input device.
+  const touch = new Set();
+
+  function intents() {
+    const on = new Set(touch);
+    if (held.has("w")) on.add("fwd");
+    if (held.has("s")) on.add("back");
+    if (ctrlDown) {                          // Ctrl turns A/D from spin into strafe
+      if (held.has("a")) on.add("strafeL");
+      if (held.has("d")) on.add("strafeR");
+    } else {
+      if (held.has("a")) on.add("spinL");    // A = counter-clockwise = +omega
+      if (held.has("d")) on.add("spinR");
+    }
+    if (held.has("q")) on.add("diagFL");
+    if (held.has("e")) on.add("diagFR");
+    if (held.has("z")) on.add("diagBL");
+    if (held.has("c")) on.add("diagBR");
+    return on;
+  }
+
+  function anyInput() { return held.size > 0 || touch.size > 0; }
+
+  function derive() {
+    const on = intents();
+    let vx = 0, vy = 0, om = 0;
+    if (on.has("fwd")) vx += 1200;
+    if (on.has("back")) vx -= 1200;
+    if (on.has("strafeL")) vy += 1400;
+    if (on.has("strafeR")) vy -= 1400;
+    if (on.has("spinL")) om += 900;
+    if (on.has("spinR")) om -= 900;
+    if (on.has("diagFL")) { vx += 1000; vy += 1000; }
+    if (on.has("diagFR")) { vx += 1000; vy -= 1000; }
+    if (on.has("diagBL")) { vx -= 1000; vy += 1000; }
+    if (on.has("diagBR")) { vx -= 1000; vy -= 1000; }
+    if (!cfg.holonomic) vy = 0;              // ordinary wheels cannot strafe
+
+    const scale = Number(els.speed.value) / 100;
+    const cap = cfg.maxDuty;
+    return {
+      vx: clamp(Math.round(vx * scale), -cap, cap),
+      vy: clamp(Math.round(vy * scale), -cap, cap),
+      omega: clamp(Math.round(om * scale), -cap, cap),
+    };
+  }
+
+  function paintKeys() {
+    for (const kbd of els.keys.children) {
+      const k = kbd.dataset.key;
+      kbd.classList.toggle("on", k === "ctrl" ? ctrlDown : held.has(k));
+    }
+  }
+
+  function sendDrive(force) {
+    if (!control || control.readyState !== 1) return;
+    const v = degraded ? { vx: 0, vy: 0, omega: 0 } : derive();
+    const key = `${v.vx},${v.vy},${v.omega}`;
+    if (!force && key === lastSent && key === "0,0,0") return;
+    lastSent = key;
+    control.send(JSON.stringify({ type: "drive", ...v }));
+
+    els.vx.textContent = v.vx; els.vy.textContent = v.vy; els.om.textContent = v.omega;
+    const moving = v.vx || v.vy || v.omega;
+    els.tag.textContent = degraded ? "holding" : moving ? "driving" : "idle";
+    els.tag.className = "tag" + (degraded ? " blocked" : moving ? " moving" : "");
+  }
+
+  function stopNow() {
+    held.clear(); touch.clear(); arrows.clear(); paintKeys(); paintPad();
+    if (control && control.readyState === 1) control.send(JSON.stringify({ type: "stop" }));
+    lastSent = "0,0,0";
+    els.vx.textContent = els.vy.textContent = els.om.textContent = "0";
+    els.tag.textContent = "idle"; els.tag.className = "tag";
+  }
+
+  function editable(t) {
+    return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+  }
+
+  addEventListener("keydown", e => {
+    if (els.help.open && e.key === "Escape") { els.help.close(); return; }
+    if (editable(e.target)) return;
+    const k = e.key.toLowerCase();
+
+    if (k === "control") { ctrlDown = true; paintKeys(); sendDrive(); return; }
+    if (e.key === " " || k === "escape") { e.preventDefault(); stopNow(); return; }
+
+    if (KEYS.includes(k)) {
+      // Ctrl+C with a selection stays a copy; otherwise it is a diagonal.
+      if (k === "c" && e.ctrlKey && String(getSelection()) !== "") return;
+      e.preventDefault();
+      if (!held.has(k)) { held.add(k); paintKeys(); sendDrive(true); }
+      return;
+    }
+    if (e.key.startsWith("Arrow")) { e.preventDefault(); arrows.add(e.key); }
+  });
+
+  addEventListener("keyup", e => {
+    const k = e.key.toLowerCase();
+    if (k === "control") { ctrlDown = false; paintKeys(); sendDrive(true); return; }
+    if (KEYS.includes(k)) { held.delete(k); paintKeys(); sendDrive(true); return; }
+    if (e.key.startsWith("Arrow")) arrows.delete(e.key);
+  });
+
+  // Alt-tabbing must never leave a car driving in another country.
+  addEventListener("blur", stopNow);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopNow(); });
+
+  els.stopBtn.addEventListener("click", stopNow);
+  els.speed.addEventListener("input", () => {
+    els.speedVal.textContent = els.speed.value;
+    sendDrive(true);
+  });
+
+  // ---- camera ramp --------------------------------------------------------
+  function sendLook() {
+    if (control && control.readyState === 1)
+      control.send(JSON.stringify({ type: "look", pan, tilt }));
+  }
+  setInterval(() => {
+    if (!arrows.size || degraded) return;
+    let moved = false;
+    // Hardware truth: higher pan is RIGHT, and tilt travels horizon-upward.
+    if (arrows.has("ArrowRight")) { pan = clamp(pan + LOOK_STEP, LOOK_MIN, LOOK_MAX); moved = true; }
+    if (arrows.has("ArrowLeft"))  { pan = clamp(pan - LOOK_STEP, LOOK_MIN, LOOK_MAX); moved = true; }
+    if (arrows.has("ArrowUp"))    { tilt = clamp(tilt + LOOK_STEP, LOOK_MIN, LOOK_MAX); moved = true; }
+    if (arrows.has("ArrowDown"))  { tilt = clamp(tilt - LOOK_STEP, LOOK_MIN, LOOK_MAX); moved = true; }
+    if (moved) sendLook();
+  }, LOOK_MS);
+
+  els.recentre.addEventListener("click", () => { pan = 90; tilt = 90; sendLook(); });
+
+  // ---- heartbeat ----------------------------------------------------------
+  setInterval(() => { if (anyInput()) sendDrive(true); }, HEARTBEAT_MS);
+
+  // ---- link supervision ---------------------------------------------------
+  function setLink(state, label) {
+    els.link.dataset.state = state;
+    els.linkState.textContent = label;
+  }
+
+  function setDegraded(on, why) {
+    if (degraded === on) return;
+    degraded = on;
+    els.veil.classList.toggle("on", on);
+    els.video.classList.toggle("stale", on);
+    els.veilWhy.textContent = why || "";
+    if (on) { setLink("degraded", "degraded"); sendDrive(true); }
+    else setLink("live", "live");
+  }
+
+  setInterval(() => {
+    if (!control || control.readyState !== 1) return;
+    if (outstanding >= MISSED_PONGS_DEGRADED) {
+      rtts.push(null); trimTape(); paintLatency();
+      setDegraded(true, `${outstanding} pings unanswered`);
+    }
+    outstanding++;
+    control.send(JSON.stringify({ type: "ping", t: Date.now() }));
+  }, PING_MS);
+
+  function trimTape() { while (rtts.length > TAPE_N) rtts.shift(); }
+
+  // Average over the window rather than the instantaneous sample: one jittery
+  // ping is noise, ten of them is the link's actual condition. Painted on each
+  // pong — no animation loop, because nothing here changes between replies.
+  function paintLatency() {
+    const seen = rtts.filter(v => v !== null);
+    if (!seen.length) {
+      els.avg.textContent = "———";
+      els.gaugeFill.style.width = "0";
+      return;
+    }
+    const avg = Math.round(seen.reduce((a, b) => a + b, 0) / seen.length);
+    els.avg.textContent = avg;
+    // Fill is read against the degrade threshold, so a full bar means "at the
+    // edge of usable" rather than an arbitrary maximum.
+    els.gaugeFill.style.width = clamp((avg / RTT_DEGRADED_MS) * 100, 3, 100) + "%";
+    els.gaugeFill.style.background =
+      avg > RTT_DEGRADED_MS ? "var(--accent)" : avg > 400 ? "#e0a02c" : "var(--secondary)";
+  }
+
+  // ---- sockets ------------------------------------------------------------
+  let retry = 500;
+
+  function connectControl() {
+    setLink("down", "connecting");
+    const ws = new WebSocket(`${wsRoot}/ws/control${tokenQuery}`);
+    control = ws;
+
+    ws.onopen = () => { retry = 500; setLink("live", "live"); outstanding = 0; };
+
+    ws.onmessage = ev => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+
+      if (m.type === "pong") {
+        outstanding = 0;
+        lastRtt = Date.now() - m.t;
+        rtts.push(lastRtt); trimTape(); paintLatency();
+        setDegraded(lastRtt > RTT_DEGRADED_MS, `round trip ${lastRtt} ms`);
+
+      } else if (m.type === "hello") {
+        cfg = { maxDuty: m.max_duty ?? 1400, deadmanMs: m.deadman_ms ?? 700,
+                holonomic: !!m.holonomic };
+        isController = m.controller !== false;
+        els.maxDuty.textContent = cfg.maxDuty;
+        els.build.textContent =
+          `${m.wheels || "?"} · ${cfg.holonomic ? "holonomic" : "no strafe"} · ` +
+          `deadman ${cfg.deadmanMs} ms` + (isController ? "" : " · view only");
+        if (!cfg.holonomic) {
+          els.vyWrap.style.opacity = ".4";
+          for (const b of els.pad.querySelectorAll("[data-intent]"))
+            if (/^(strafe|diag)/.test(b.dataset.intent)) b.disabled = true;
+        }
+        if (m.battery_v != null) showBattery(m.battery_v);
+
+      } else if (m.type === "telemetry") {
+        if (m.battery_v != null) showBattery(m.battery_v);
+        if (m.distance_cm != null) showRange(m.distance_cm);
+
+      } else if (m.type === "look") {
+        pan = m.pan; tilt = m.tilt;                 // clamped echo wins over our guess
+        els.pan.textContent = pan; els.tilt.textContent = tilt;
+
+      } else if (m.type === "error") {
+        if (m.detail === "busy") {
+          isController = false;
+          els.build.textContent = "another driver has control · view only";
+          els.tag.textContent = "view only"; els.tag.className = "tag blocked";
+        }
+      }
+    };
+
+    ws.onclose = ev => {
+      setLink("down", "offline");
+      setDegraded(true, ev.code === 1013 ? "robot offline" : "control socket closed");
+      control = null;
+      setTimeout(connectControl, retry);
+      retry = Math.min(retry * 2, 8000);        // back off, do not hammer the Pi
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  // Closing the socket is what actually saves the bytes: the gateway tears down
+  // its upstream connection, and the robot stops encoding for this client.
+  // Defaults on, and resets on every page load — a session should never start
+  // with the operator unknowingly blind.
+  let videoOn = true, videoWs = null, videoRetry = 1500;
+
+  function setVideo(on) {
+    videoOn = on;
+    els.videoBtn.textContent = on ? "Turn camera off" : "Turn camera on";
+    els.camoff.classList.toggle("on", !on);
+    els.screen.classList.toggle("off", !on);
+    if (on) {
+      els.placeholder.textContent = "waiting for video…";
+      videoRetry = 1500;               // operator asked: try now, not in 8 seconds
+      connectVideo();
+    } else {
+      els.placeholder.hidden = true;
+      els.video.hidden = true;
+      if (videoWs) { const w = videoWs; videoWs = null; w.close(); }
+    }
+  }
+
+  function connectVideo() {
+    if (!videoOn) return;
+    const ws = new WebSocket(`${wsRoot}/ws/video${tokenQuery}`);
+    videoWs = ws;
+    ws.binaryType = "blob";
+    let url = null;
+    ws.onmessage = ev => {
+      videoRetry = 1500;                            // a frame arrived: link is good
+      els.placeholder.hidden = true;
+      els.video.hidden = false;
+      const next = URL.createObjectURL(ev.data);
+      els.video.src = next;
+      if (url) URL.revokeObjectURL(url);          // or the tab leaks a frame at a time
+      url = next;
+    };
+    ws.onclose = ev => {
+      if (!videoOn) return;            // deliberate: do not fight the operator
+      els.video.hidden = true;
+      els.placeholder.hidden = false;
+      if (ev.code === 1008) {
+        // Refused by policy, not a broken link. Retrying would just reconnect
+        // into the same refusal once a second, so stop and say why.
+        videoOn = false;
+        els.videoBtn.textContent = "Turn camera on";
+        els.camoff.classList.add("on");
+        els.screen.classList.add("off");
+        els.placeholder.hidden = true;
+        return;
+      }
+      // 1013 (try again later) means the gateway reached for the robot and
+      // found it off. Keep retrying — it should reconnect on its own when the
+      // car comes back — but back off like the control socket does, or a car
+      // left switched off is retried twice a second all afternoon.
+      els.placeholder.textContent = ev.code === 1013
+        ? "robot offline — retrying"
+        : "video link lost — reconnecting";
+      setTimeout(connectVideo, videoRetry);
+      videoRetry = Math.min(videoRetry * 2, 8000);
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  els.videoBtn.addEventListener("click", () => setVideo(!videoOn));
+
+  // ---- readouts -----------------------------------------------------------
+  function showBattery(v) {
+    els.batt.textContent = v.toFixed(2);
+    const pct = clamp(((v - 6.4) / (8.4 - 6.4)) * 100, 0, 100);
+    els.battBar.style.width = pct + "%";
+    els.battCard.classList.toggle("alarm", v < 6.8);
+  }
+
+  function showRange(cm) {
+    els.range.textContent = Math.round(cm);
+    els.rangeBar.style.width = clamp((cm / 150) * 100, 0, 100) + "%";
+    const close = cm < 30;
+    els.rangeCard.classList.toggle("alarm", close);
+    els.prox.classList.toggle("on", close);
+    els.proxCm.textContent = close ? `${Math.round(cm)} cm` : "";
+  }
+
+  // ---- touch pad ----------------------------------------------------------
+  function paintPad() {
+    for (const b of els.pad.querySelectorAll("[data-intent]"))
+      b.classList.toggle("on", touch.has(b.dataset.intent));
+    for (const b of els.pad.querySelectorAll("[data-arrow]"))
+      b.classList.toggle("on", arrows.has(b.dataset.arrow));
+  }
+
+  function holdButton(btn, press, release) {
+    // Pointer events cover finger and mouse alike. Capture means a finger that
+    // slides off the button still releases it — otherwise dragging away from a
+    // direction key would latch the car into driving.
+    btn.addEventListener("pointerdown", e => {
+      e.preventDefault();
+      btn.setPointerCapture(e.pointerId);
+      press();
+    });
+    for (const ev of ["pointerup", "pointercancel"])
+      btn.addEventListener(ev, e => { e.preventDefault(); release(); });
+  }
+
+  for (const btn of els.pad.querySelectorAll("[data-intent]")) {
+    const name = btn.dataset.intent;
+    holdButton(btn,
+      () => { touch.add(name); paintPad(); sendDrive(true); },
+      () => { touch.delete(name); paintPad(); sendDrive(true); });
+  }
+  for (const btn of els.pad.querySelectorAll("[data-arrow]")) {
+    const name = btn.dataset.arrow;
+    holdButton(btn,
+      () => { arrows.add(name); paintPad(); },
+      () => { arrows.delete(name); paintPad(); });
+  }
+  els.padStop.addEventListener("click", stopNow);
+  els.padCentre.addEventListener("click", () => { pan = 90; tilt = 90; sendLook(); });
+  els.padBtn.addEventListener("click", () => document.body.classList.toggle("show-pad"));
+
+  els.helpBtn.addEventListener("click", () => els.help.showModal());
+  els.helpClose.addEventListener("click", () => els.help.close());
+
+  connectControl();
+  connectVideo();
+})();
+</script>
+</body>
+</html>

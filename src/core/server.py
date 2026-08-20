@@ -199,6 +199,16 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
 
     app = FastAPI(title="Robot Fleet Gateway", lifespan=lifespan)
 
+    # Browser teleop: the driving console and the realtime socket proxy to each
+    # robot's own control server. Both registered BEFORE the mounts below —
+    # Starlette matches in registration order, and app.mount("/{name}") claims
+    # every path beneath it, so mounting first makes these dead code.
+    from core.console import register_console
+    from core.ws_proxy import register_ws_proxy
+
+    register_ws_proxy(app, plugins)
+    register_console(app, plugins)
+
     for name, mcp_app in mcp_apps.items():
         app.mount(f"/{name}", mcp_app)
 
@@ -209,6 +219,10 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
             "robots": {
                 name: {
                     "mcp_endpoint": f"/{name}/mcp",
+                    # Present only for robots with a realtime control server —
+                    # its absence is how a caller knows this one cannot be driven
+                    # from a browser.
+                    **({"ui_endpoint": f"/{name}/ui"} if plugin.control_base_urls() else {}),
                     "tools": plugin.tool_names(),
                     "reservation": registry.status(name),
                 }

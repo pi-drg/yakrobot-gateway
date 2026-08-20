@@ -111,10 +111,28 @@ def export_descriptor(robot, public_domain="", out=None, stdout=False):
     print(f"Wrote {os.path.relpath(out)}", file=sys.stderr)
 
 
-def run_simulator(port=8080):
-    """Start the hardware-free fakerobot simulator."""
+SIMULATORS = {
+    "fakerobot": ("plugins.fakerobot.simulator", 8080),
+    "fakerobot_picar": ("plugins.fakerobot_picar.simulator", 8081),
+}
+
+
+def run_simulator(port=None, robot="fakerobot"):
+    """Start a hardware-free robot simulator (blocking)."""
+    import importlib
+
     import uvicorn
 
-    from plugins.fakerobot.simulator import app
+    if robot not in SIMULATORS:
+        raise SystemExit(
+            f"Unknown simulator {robot!r}. Available: {sorted(SIMULATORS)}"
+        )
+    module_path, default_port = SIMULATORS[robot]
+    app = importlib.import_module(module_path).app
+    port = default_port if port is None else port
 
+    print(f"{robot} simulator on http://0.0.0.0:{port}")
+    if robot == "fakerobot_picar":
+        print(f"  ws://0.0.0.0:{port}/ws/control   realtime control")
+        print(f"  ws://0.0.0.0:{port}/ws/video     JPEG frames")
     uvicorn.run(app, host="0.0.0.0", port=port)
