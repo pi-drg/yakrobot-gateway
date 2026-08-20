@@ -1,12 +1,13 @@
 # yakrobot-gateway
 
-Robot **controller**. Serves per-robot MCP control endpoints, local fleet discovery,
-and a generic per-robot reservation (who's in control), behind a single port and one
-ngrok tunnel. **Contains no blockchain code** — on-chain identity, registration,
-discovery, and attestation live in the separate
-[`yakrobot-identity`](../yakrobot-identity) layer. **Task auctions / marketplace** live
-in the separate [`yakrobot-marketplace`](../yakrobot-marketplace) service, which reaches
-robots over MCP; this gateway is a pure controller.
+Robot **controller**. Serves per-robot MCP control endpoints, a browser driving
+console, local fleet discovery, and a generic per-robot reservation (who's in
+control), behind a single port and one ngrok tunnel. **Contains no blockchain
+code** — on-chain identity, registration, discovery, and attestation live in the
+separate [`yakrobot-identity`](../yakrobot-identity) layer. **Task auctions /
+marketplace** live in the separate
+[`yakrobot-marketplace`](../yakrobot-marketplace) service, which reaches robots
+over MCP; this gateway is a pure controller.
 
 > Extracted from
 > [`YakRoboticsGarage/yakrover-8004-mcp`](https://github.com/YakRoboticsGarage/yakrover-8004-mcp)
@@ -20,12 +21,16 @@ robots over MCP; this gateway is a pure controller.
 
 - **FastAPI gateway** with ASGI sub-mounts — each robot gets its own isolated FastMCP
   server instance. Single port, single ngrok tunnel.
-- Endpoints: `/fleet/mcp` (local discovery), `/{robot}/mcp` (per-robot control).
+- Endpoints: `/fleet/mcp` (local discovery), `/{robot}/mcp` (per-robot control),
+  `/{robot}/ui` (driving console), `/{robot}/ws/*` (realtime sockets).
 - `/fleet/mcp` exposes `list_connected` (local plugin-registry introspection —
   **no chain**).
 - Every `/{robot}/mcp` tool passes through a reservation guard (`robot_reserve` /
   `robot_release` / `robot_status`) so two agents can't drive one robot at once.
 - Plugin auto-discovery scans `src/plugins/` for `RobotPlugin` subclasses.
+
+`GET /` lists every mounted robot; a `ui_endpoint` in its entry means that robot
+can be driven from a browser.
 
 ## Plugin system
 
@@ -36,6 +41,11 @@ Each robot is a package under `src/plugins/{name}/`:
 - `mcp_tools.py` — MCP-facing adapter: `register(mcp, robot)` defining `@mcp.tool` handlers
 
 Tool naming: `{robot_prefix}_{action}` (e.g. `tumbller_move`).
+
+A plugin that also implements `control_base_urls()` (and `control_auth_token()`
+if its robot needs one) gets the console and the socket proxy for free. Returning
+no URL is how a robot opts out — the Tello speaks UDP and has no socket to proxy,
+so it is served over MCP only.
 
 ## Common commands
 
@@ -49,6 +59,7 @@ uv run yakrobot-py serve --robots fakerobot         # serve one robot
 uv run yakrobot-py serve --robots tumbller --tunnel ngrok   # with a public tunnel
 uv run yakrobot-py status                           # inspect a running gateway (mounts + reservations)
 uv run yakrobot-py sim                              # start the hardware-free fakerobot simulator (:8080)
+uv run yakrobot-py sim --robot fakerobot_picar      # ...the PiCar simulator instead (:8081, with sockets)
 ```
 
 The legacy `uv run python scripts/serve.py …` entrypoint still works — it forwards to the
@@ -72,6 +83,38 @@ contract (`descriptor.schema.json`) — the JSON is the only thing that crosses 
 the repos; neither imports the other's types. To discover or attest robots on-chain, use
 the identity repo's own CLI (`scripts/discover.py`, `scripts/attest.py`).
 
+## Driving from a browser
+
+Robots with a realtime control server are drivable from `/{robot}/ui` — a
+self-contained console (keyboard, on-screen pad, live video, latency gauge) that
+the gateway serves itself. The page opens `/{robot}/ws/control` and
+`/{robot}/ws/video`, which the gateway proxies the last LAN hop to the robot;
+the robot needs no public address of its own.
+
+```bash
+uv sync --extra picar-freenove
+uv run yakrobot-py serve --robots picar_freenove    # then open localhost:8000/picar_freenove/ui
+```
+
+Hardware-free, in two terminals — the simulator serves the same sockets a real
+car does:
+
+```bash
+uv run yakrobot-py sim --robot fakerobot_picar      # terminal 1  (:8081)
+uv run yakrobot-py serve --robots fakerobot_picar   # terminal 2  → :8000/fakerobot_picar/ui
+```
+
+The console is served unauthenticated even when gateway tokens are set — it is
+inert markup, and every socket it opens is checked on connect. With `MCP_TOKENS`
+configured, open it as `/{robot}/ui?token=…`; the page passes that token to its
+sockets, which is where it is actually enforced.
+
+Safety and etiquette live on the robot, not here: a deadman timer stops a car
+whose operator goes quiet, and only one browser holds control at a time (others
+watch). Video is the expensive half of the link — the console can turn it off
+per operator, and `VIDEO_ENABLED=0` refuses it gateway-wide, leaving the car
+drivable but blind.
+
 ## End-to-end flow (two repos)
 
 ```
@@ -92,6 +135,9 @@ robots and exports their descriptors, and holds no chain code.
 Serving with a tunnel: `NGROK_AUTHTOKEN`, `NGROK_DOMAIN`.
 Auth: `MCP_TOKENS`/`MCP_TOKENS_FILE` (per-agent tokens — needed for reservations to tell
 callers apart) or `MCP_BEARER_TOKEN` (single shared token).
-Optional: `TUMBLLER_URL`, `TELLO_HOST`, `FAKEROBOT_URL`.
+Optional: `TUMBLLER_URL`, `TELLO_HOST`, `FAKEROBOT_URL`, `FAKEROBOT_PICAR_URL`.
+`PICAR_FREENOVE_URL` takes a comma-separated candidate list (mDNS name, IP, …) — the
+first that answers wins; `PICAR_FREENOVE_TOKEN` only if the car runs with auth on.
+Teleop: `VIDEO_ENABLED=0` refuses `/ws/video` for every client.
 On-chain registration secrets (`SIGNER_PVT_KEY`, `PINATA_JWT`, …) live in
 `yakrobot-identity`; payment/marketplace secrets live in `yakrobot-marketplace` — not here.
