@@ -12,6 +12,7 @@ when reading these signatures:
 from typing import Literal
 
 from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 
 from .robot_adapter import PicarFreenoveAdapter
 
@@ -136,13 +137,15 @@ def register(mcp: FastMCP, adapter: PicarFreenoveAdapter) -> None:
         return await adapter.line()
 
     @mcp.tool
-    async def picar_freenove_snapshot() -> dict:
-        """Capture one frame from the car's camera as a base64 JPEG data URI.
+    async def picar_freenove_snapshot() -> Image:
+        """Capture one frame from the car's camera.
 
-        Aim the head with picar_freenove_look first. The image is large — request
-        it when you need to see, not as a routine status check.
+        Returns the actual image, not a description of it — an MCP client shows
+        it inline. Aim the head with picar_freenove_look first. The image is
+        large — request it when you need to see, not as a routine status check.
         """
-        return await adapter.snapshot()
+        jpeg = await adapter.snapshot_bytes()
+        return Image(data=jpeg, format="jpeg")
 
     # --- lights ------------------------------------------------------------
 

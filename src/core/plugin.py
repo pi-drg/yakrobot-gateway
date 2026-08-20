@@ -61,6 +61,40 @@ class RobotPlugin(ABC):
         """
         ...
 
+    def control_base_urls(self) -> list[str]:
+        """Candidate base HTTP URLs for the robot's own control server.
+
+        Implemented by plugins that front an on-robot HTTP server — the PiCar
+        runs ``picar_freenove_fastapi`` on the Raspberry Pi itself. The gateway
+        uses these to reverse-proxy realtime WebSocket traffic
+        (``/{robot}/ws/*``) through to the robot, so a browser that can reach
+        only the gateway can still hold a live control socket against hardware.
+
+        A **list, tried in order**, because neither way of naming a robot on a
+        LAN is reliable alone: an mDNS name survives the DHCP lease changing
+        but needs a working resolver, while a bare IP needs neither but breaks
+        the moment the lease moves. Listing both means whichever is true today
+        wins, and no one has to notice which.
+
+        Empty list means "no realtime socket": plugins that reach their
+        hardware another way (djitellopy speaks UDP to the Tello) get no
+        ``/ws/*`` route, and a request for one is refused rather than misrouted.
+        """
+        return []
+
+    def control_auth_token(self) -> str | None:
+        """This robot's own bearer token, if it runs with auth enabled.
+
+        The gateway injects it into the upstream WebSocket handshake so the
+        browser never holds a robot credential. Per-plugin rather than read
+        from one env var in the proxy, because sending one robot's token to
+        another robot is both a leak and a puzzling 401.
+
+        None (the default) means the robot has no auth — normal on a trusted
+        LAN, and the current state of the PiCar.
+        """
+        return None
+
     async def bid(self, task_spec: dict) -> dict | None:
         """Generate a bid for a task. Override in marketplace-participating plugins.
 

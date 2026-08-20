@@ -84,9 +84,18 @@ def export(
 
 
 @app.command()
-def sim(port: int = typer.Option(8080, help="Port to bind")):
-    """Start the hardware-free fakerobot simulator."""
-    commands.run_simulator(port)
+def sim(
+    robot: str = typer.Option(
+        "fakerobot", help="Which simulator: fakerobot | fakerobot_picar"
+    ),
+    port: int = typer.Option(None, help="Port to bind (default: per simulator)"),
+):
+    """Start a hardware-free robot simulator.
+
+    ``fakerobot_picar`` also serves /ws/control and /ws/video, so the teleop UI
+    and the gateway's WebSocket proxy can be tested without a robot.
+    """
+    commands.run_simulator(port, robot)
 
 
 def main(argv=None) -> None:

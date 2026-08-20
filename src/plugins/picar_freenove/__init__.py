@@ -58,6 +58,22 @@ class PicarFreenovePlugin(RobotPlugin):
             "picar_freenove_led",
         ]
 
+    def control_base_urls(self) -> list[str]:
+        """The car's own FastAPI server — the gateway proxies /ws/* to it.
+
+        Same candidates the MCP adapter resolves from, deliberately: both must
+        agree on which car they are talking to.
+        """
+        from .robot_adapter import control_base_urls
+
+        return control_base_urls()
+
+    def control_auth_token(self) -> str | None:
+        """PICAR_FREENOVE_TOKEN, or None when the car runs with auth disabled."""
+        from .robot_adapter import control_token
+
+        return control_token() or None
+
     def register_tools(self, mcp):
         from .robot_adapter import PicarFreenoveAdapter
         from .mcp_tools import register
