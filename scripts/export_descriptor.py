@@ -8,7 +8,8 @@ implementation:
     yakrobot-py export tumbller --stdout
 
 The descriptor is the cross-repo contract (yakrobot-descriptor). This gateway only
-*produces* it; on-chain registration is performed in yakrobot-identity, fed this JSON.
+*produces* it; registering it on-chain is a transaction signed by a browser wallet, in no
+repo. A running gateway also serves the same document live at /{robot}/descriptor.
 Requires the `export` extra:  uv sync --extra export
 
 This script forwards its arguments to `yakrobot export`.

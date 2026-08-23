@@ -46,7 +46,8 @@ yakrobot-gateway/
 │   │   ├── ws_proxy.py    # /{robot}/ws/* spliced through to the robot's own control server
 │   │   ├── console.py     # /{robot}/ui — serves the driving console
 │   │   ├── static/        # console.html: the whole console, one self-contained file
-│   │   └── descriptor.py  # build_descriptor: plugin metadata → RobotDescriptor (export extra)
+│   │   ├── descriptor.py  # build_descriptor: plugin metadata → RobotDescriptor (export extra)
+│   │   └── descriptor_route.py # /{robot}/descriptor — the same JSON, served live + CORS
 │   └── plugins/           # One sub-package per robot (device-neutral; IoT/printers later)
 │       ├── tumbller/  tello/  fakerobot/  picar_freenove/  fakerobot_picar/  _template/
 └── scripts/               # serve.py + export_descriptor.py (emits the JSON contract)
@@ -60,7 +61,8 @@ yakrobot-gateway/
 - **FastAPI gateway** with ASGI sub-mounts — each robot gets its own isolated FastMCP
   instance. Single port, single ngrok tunnel.
 - Endpoints: `/fleet/mcp` (local discovery only), `/{robot}/mcp` (control),
-  `/{robot}/ui` (console), `/{robot}/ws/*` (realtime sockets).
+  `/{robot}/ui` (console), `/{robot}/ws/*` (realtime sockets),
+  `/{robot}/descriptor` (the descriptor JSON, live).
 - Every `/{robot}/mcp` tool passes through `ReservationMiddleware` — a robot reserved by
   one agent rejects control calls from others (identity = per-agent token `client_id`).
 - Plugin auto-discovery scans `src/plugins/` for `RobotPlugin` subclasses.
@@ -68,10 +70,20 @@ yakrobot-gateway/
   gateway splices to the robot; it does not go through FastMCP or the reservation
   registry. Its own single-driver rule and deadman timer live *on the robot*.
 
-**Route order is load-bearing.** `register_ws_proxy` and `register_console` must run
-before `app.mount(f"/{name}", ...)` in `create_gateway`. Starlette matches in
-registration order and a mount claims every path beneath its prefix, so a `/{robot}/ui`
-or `/{robot}/ws/*` route added after the mounts is dead code that never sees a request.
+**Route order is load-bearing.** `register_ws_proxy`, `register_console` and
+`register_descriptor_route` must all run before `app.mount(f"/{name}", ...)` in
+`create_gateway`. Starlette matches in registration order and a mount claims every path
+beneath its prefix, so a `/{robot}/ui`, `/{robot}/ws/*` or `/{robot}/descriptor` route
+added after the mounts is dead code that never sees a request.
+
+**`/` and `/{robot}/descriptor` are the only cross-origin surfaces.** Both carry
+`Access-Control-Allow-Origin: *` and an `OPTIONS` preflight handler, because the browser
+registration page reads them from another origin — and the `ngrok-skip-browser-warning`
+header it must send to get past free-tier ngrok's interstitial makes every request
+non-simple, so the preflight is mandatory, not decorative. The headers are per-route on
+purpose: no CORS middleware, so the console, the sockets and the MCP mounts stay
+same-origin only. The errors carry the headers too, or the page reads a failed fetch
+instead of the reason.
 
 ## Plugin System
 
@@ -152,6 +164,11 @@ uv run pytest -q
 uv sync --extra export
 uv run yakrobot-py export tumbller     # --public-domain defaults from $NGROK_DOMAIN / $CLOUDFLARE_DOMAIN
 # writes robot-descriptors/tumbller.json (gitignored artifact; source of truth = metadata())
+
+# A running gateway serves the same document live, which is what the browser
+# registration page reads (it needs the `export` extra too, else 501):
+curl -s localhost:8000/fakerobot/descriptor | jq .
+curl -s localhost:8000/ | jq '.robots[].descriptor_endpoint'
 
 # Registering that JSON on-chain is a signed transaction made from a browser wallet;
 # there is no CLI for it. To find/verify robots already on-chain, use yakrobot-identity's

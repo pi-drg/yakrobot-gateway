@@ -81,6 +81,22 @@ The descriptor shape is the shared
 (`descriptor.schema.json`) — the JSON is the only thing that crosses between the repos;
 neither imports the other's types. See [End-to-end flow](#end-to-end-flow).
 
+A running gateway also serves the same document **live**, so nothing has to hand a file
+around:
+
+```bash
+curl -s localhost:8000/                        # which robots, and each descriptor_endpoint
+curl -s localhost:8000/tumbller/descriptor     # the descriptor itself
+```
+
+Both routes send `Access-Control-Allow-Origin: *`, because the browser page that
+registers a robot reads them from another origin; they are the only cross-origin
+surfaces here. The public endpoints inside the descriptor resolve from `$NGROK_DOMAIN`,
+then `$CLOUDFLARE_DOMAIN`, then the request's own `Host` header — so a gateway behind a
+tunnel is registerable with no configuration at all. Without the `export` extra the route
+answers `501`, and with no resolvable public host `503`, rather than emitting a
+descriptor whose MCP URL is empty.
+
 Registration is signed by a browser wallet, so there is no CLI for it in any repo:
 `yakrobot-identity` is read-only. To *find* or *verify* robots already on-chain, use its
 `scripts/discover.py` and `scripts/attestations.py`.
