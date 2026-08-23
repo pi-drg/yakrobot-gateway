@@ -18,8 +18,11 @@ class TemplatePlugin(RobotPlugin):
             description="Description of your robot.",
             robot_type="differential_drive",  # e.g. quadrotor, articulated_arm
             url_prefix="myrobot",              # URL path: /myrobot/mcp
-            fleet_provider="yakrobot",
-            fleet_domain="yakrobot.com/dev",
+            # Fleet identity is assigned by whoever registers the robot on-chain, not
+            # claimed here — a gateway cannot verify whose fleet it belongs to. Left empty
+            # so the descriptor carries no unverified claim; the registrar fills it in.
+            fleet_provider="",
+            fleet_domain="",
         )
 
     def tool_names(self) -> list[str]:

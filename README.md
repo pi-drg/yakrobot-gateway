@@ -3,11 +3,11 @@
 Robot **controller**. Serves per-robot MCP control endpoints, a browser driving
 console, local fleet discovery, and a generic per-robot reservation (who's in
 control), behind a single port and one ngrok tunnel. **Contains no blockchain
-code** — on-chain identity, registration, discovery, and attestation live in the
-separate [`yakrobot-identity`](../yakrobot-identity) layer. **Task auctions /
-marketplace** live in the separate
-[`yakrobot-marketplace`](../yakrobot-marketplace) service, which reaches robots
-over MCP; this gateway is a pure controller.
+code** — on-chain discovery and attestation reads live in the separate
+[`yakrobot-identity`](https://github.com/pi-drg/yakrobot-identity) layer, and
+registration is signed by a browser wallet outside both. **Task auctions /
+marketplace** live in the separate `yakrobot-marketplace` service, which reaches
+robots over MCP; this gateway is a pure controller.
 
 > Extracted from
 > [`YakRoboticsGarage/yakrover-8004-mcp`](https://github.com/YakRoboticsGarage/yakrover-8004-mcp)
@@ -68,20 +68,26 @@ same implementation.
 ### Exporting a robot descriptor (for on-chain registration elsewhere)
 
 This gateway holds **no chain code**. To put a robot on-chain you *export its descriptor
-as JSON here*, then register it from `yakrobot-identity`:
+as JSON here*, and register it with that JSON elsewhere:
 
 ```bash
 uv sync --extra export
 uv run yakrobot-py export tumbller   # --public-domain defaults from $NGROK_DOMAIN / $CLOUDFLARE_DOMAIN
-# writes robot-descriptors/tumbller.json (a gitignored, regenerable artifact); then:
-cd ../yakrobot-identity
-uv run python scripts/register.py --descriptor ../yakrobot-gateway/robot-descriptors/tumbller.json --chain base-sepolia
+# writes robot-descriptors/tumbller.json (a gitignored, regenerable artifact)
 ```
 
-The descriptor shape is the shared [`yakrobot-descriptor`](../yakrobot-descriptor)
-contract (`descriptor.schema.json`) — the JSON is the only thing that crosses between
-the repos; neither imports the other's types. To discover or attest robots on-chain, use
-the identity repo's own CLI (`scripts/discover.py`, `scripts/attest.py`).
+The descriptor shape is the shared
+[`yakrobot-descriptor`](https://github.com/pi-drg/yakrobot-descriptor) contract
+(`descriptor.schema.json`) — the JSON is the only thing that crosses between the repos;
+neither imports the other's types. See [End-to-end flow](#end-to-end-flow).
+
+Registration is signed by a browser wallet, so there is no CLI for it in any repo:
+`yakrobot-identity` is read-only. To *find* or *verify* robots already on-chain, use its
+`scripts/discover.py` and `scripts/attestations.py`.
+
+`fleet_provider` and `fleet_domain` are exported **empty**. A gateway cannot verify whose
+fleet it belongs to, so it makes no unverified claim; whoever registers the robot supplies
+them.
 
 ## Driving from a browser
 
@@ -115,20 +121,51 @@ watch). Video is the expensive half of the link — the console can turn it off
 per operator, and `VIDEO_ENABLED=0` refuses it gateway-wide, leaving the car
 drivable but blind.
 
-## End-to-end flow (two repos)
+## End-to-end flow
+
+[`yakrobot-descriptor`](https://github.com/pi-drg/yakrobot-descriptor) is the seam
+between this repo and the chain side. Neither imports the other; both depend on the
+contract package, and a JSON document is the only thing that crosses:
+
+```
+    ┌─ yakrobot-gateway ────┐              ┌─ yakrobot-identity ───┐
+    │  this repo            │              │  reads the chain      │
+    │  serves robots        │              │                       │
+    │                       │  robot.json  │                       │
+    │  plugin.metadata()    │              │  descriptor_io.py     │
+    │          │            │              │          │            │
+    │          ▼            │              │          ▼            │
+    │  yakrobot-py export ──┼─────────────►│  build_onchain_       │
+    │                       │              │       metadata()      │
+    └───────────┬───────────┘              └───────────┬───────────┘
+                │                                      │
+                │        both validate against         │
+                ▼                                      ▼
+          ┌─ yakrobot-descriptor ───────────────────────────┐
+          │  descriptor.schema.json                         │
+          │  the only dependency the two of them share      │
+          └─────────────────────────────────────────────────┘
+```
+
+A plugin's `metadata()` is the source of truth; `export` writes it out as a descriptor
+validated against the shared schema. Because the contract is a JSON Schema rather than a
+Python type, this gateway can be replaced by a producer in another language without the
+chain side changing — and this repo keeps no robot types in common with it.
 
 ```
 1. serve     (this repo)  bring robots online behind one ngrok URL
 2. export    (this repo)  write each robot's descriptor JSON (yakrobot-descriptor contract)
-3. register  (yakrobot-identity)  put each robot on-chain from that JSON
-4. attest    (yakrobot-identity)  vouch for a robot via EAS  (optional)
-5. discover  (yakrobot-identity)  find robots on-chain, write .mcp.json for a client
+3. register  (browser wallet)     put each robot on-chain from that JSON
+4. attest    (browser wallet)     vouch for a robot via EAS  (optional)
+5. discover  (yakrobot-identity)  find attested robots, write .mcp.json for a client
 6. connect   the client talks to this gateway's /{robot}/mcp endpoints
 ```
 
-Registration, attestation, and discovery all run from
-[`yakrobot-identity`](../yakrobot-identity). This gateway owns steps 1–2 only — it serves
-robots and exports their descriptors, and holds no chain code.
+Steps 3–4 are signed transactions and are made from a browser wallet — no repo holds a
+key for them. Step 5 runs from
+[`yakrobot-identity`](https://github.com/pi-drg/yakrobot-identity), which is read-only.
+This gateway owns steps 1–2 only: it serves robots and exports their descriptors, and
+holds no chain code.
 
 ## Environment
 
@@ -139,5 +176,6 @@ Optional: `TUMBLLER_URL`, `TELLO_HOST`, `FAKEROBOT_URL`, `FAKEROBOT_PICAR_URL`.
 `PICAR_FREENOVE_URL` takes a comma-separated candidate list (mDNS name, IP, …) — the
 first that answers wins; `PICAR_FREENOVE_TOKEN` only if the car runs with auth on.
 Teleop: `VIDEO_ENABLED=0` refuses `/ws/video` for every client.
-On-chain registration secrets (`SIGNER_PVT_KEY`, `PINATA_JWT`, …) live in
-`yakrobot-identity`; payment/marketplace secrets live in `yakrobot-marketplace` — not here.
+No chain secrets live in any of these repos: registration and attestation are signed by a
+browser wallet, and `yakrobot-identity` is read-only. Payment/marketplace secrets live in
+`yakrobot-marketplace` — not here.

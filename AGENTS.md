@@ -8,9 +8,12 @@ that repo's flow:
 
 ```bash
 # in ../yakrobot-identity
-uv run python scripts/discover.py --provider yakrobot
-uv run python scripts/discover.py --add-mcp --provider yakrobot --token <BEARER>
+uv run python scripts/discover.py --chain base-sepolia
+uv run python scripts/discover.py --add-mcp --token <BEARER>
 ```
+
+That repo is read-only and needs `THEGRAPH_API_KEY` and `EAS_TRUSTED_ATTESTERS` in its
+`.env` — see its AGENTS.md.
 
 This gateway only **serves** robots and answers "what's plugged in here?" locally (no
 chain) via the `/fleet/mcp` `list_connected` tool.
@@ -23,8 +26,9 @@ Robot **controller**: per-robot MCP control + a browser driving console + local 
 discovery + a generic per-robot reservation. Plugin-based so any robot is added with
 minimal glue. Two ways in, one gateway: agents drive over MCP, humans drive from the
 console — both reach the same robot. **No
-blockchain code** — on-chain identity/registration/discovery/attestation is delegated to
-the sibling `yakrobot-identity` package. **Task auctions / marketplace** were extracted to
+blockchain code** — on-chain discovery and attestation reads are delegated to the sibling
+`yakrobot-identity` package, and registration is signed by a browser wallet outside both.
+**Task auctions / marketplace** were extracted to
 the sibling `yakrobot-marketplace` service, which reaches robots over MCP.
 
 ## Repository Structure
@@ -104,8 +108,8 @@ core changes:
 - **websockets** — client half of the teleop proxy (the gateway connects outward as a
   client to each robot's control server)
 - **pyngrok** — tunnel management
-- **yakrobot-descriptor** (`export` extra) — shared JSON `RobotDescriptor` contract
-  consumed by `yakrobot-identity` for on-chain registration (which lives entirely there)
+- **yakrobot-descriptor** (`export` extra) — shared JSON `RobotDescriptor` contract, the
+  only thing that crosses to the on-chain side
 
 ## Common Commands
 
@@ -144,15 +148,14 @@ uv run yakrobot-py serve --robots fakerobot_picar          # ...its gateway → 
 uv sync --extra dev
 uv run pytest -q
 
-# Export a robot's JSON descriptor (needs the `export` extra), then register from
-# yakrobot-identity — no chain code runs here.
+# Export a robot's JSON descriptor (needs the `export` extra) — no chain code runs here.
 uv sync --extra export
 uv run yakrobot-py export tumbller     # --public-domain defaults from $NGROK_DOMAIN / $CLOUDFLARE_DOMAIN
 # writes robot-descriptors/tumbller.json (gitignored artifact; source of truth = metadata())
-# then, in ../yakrobot-identity:
-#   uv run python scripts/register.py --descriptor ../yakrobot-gateway/robot-descriptors/tumbller.json
 
-# On-chain registration / discovery / attestation / wallet → use yakrobot-identity's CLI.
+# Registering that JSON on-chain is a signed transaction made from a browser wallet;
+# there is no CLI for it. To find/verify robots already on-chain, use yakrobot-identity's
+# scripts/discover.py and scripts/attestations.py (read-only).
 ```
 
 ## Environment Variables
@@ -183,9 +186,9 @@ Serving:
   just blind. Absent means enabled.
 - Payments/marketplace secrets (Stripe, …) live in `yakrobot-marketplace`, not here.
 
-On-chain registration secrets (`SIGNER_PVT_KEY`, `PINATA_JWT`, `RPC_URL`, …) are **not
-used here** — they live in `yakrobot-identity`, which performs registration from the
-exported descriptor JSON.
+There are **no chain secrets** in this repo or in `yakrobot-identity`: registration and
+attestation are signed by a browser wallet, and the identity package is read-only. If a
+task seems to need `SIGNER_PVT_KEY` or `PINATA_JWT` here, it is in the wrong repo.
 
 ## Development Guidelines
 
@@ -194,6 +197,10 @@ exported descriptor JSON.
 - Add robot-specific dependencies as optional extras in `pyproject.toml`
 - No framework code changes should be needed to add a new robot
 - This repo holds **no chain code**: on-chain concerns belong in `yakrobot-identity`
+- **Leave `fleet_provider` and `fleet_domain` empty in a plugin's `metadata()`.** A gateway
+  cannot verify whose fleet it belongs to, so filling them in would put an unverified claim
+  into the exported descriptor and from there on-chain. Whoever registers the robot supplies
+  them. See `src/plugins/_template/`.
 - Use the `fakerobot` plugin for development/testing without physical hardware, and
   `fakerobot_picar` when the change touches teleop (it serves the realtime sockets)
 

@@ -11,8 +11,11 @@ class TelloPlugin(RobotPlugin):
             description="A DJI Tello quadrotor drone controllable via MCP.",
             robot_type="quadrotor",
             url_prefix="tello",
-            fleet_provider="yakrobot",
-            fleet_domain="yakrobot.com/finland",
+            # Fleet identity is assigned by whoever registers the robot on-chain, not
+            # claimed here — a gateway cannot verify whose fleet it belongs to. Left empty
+            # so the descriptor carries no unverified claim; the registrar fills it in.
+            fleet_provider="",
+            fleet_domain="",
             bidding_terms=BiddingTerms(
                 min_price_cents=100,
                 rate_per_minute_cents=50,

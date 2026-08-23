@@ -33,8 +33,11 @@ class PicarFreenovePlugin(RobotPlugin):
             # honest one. picar_freenove_capabilities reports the actual build.
             robot_type="mobile_robot",
             url_prefix="picar_freenove",
-            fleet_provider="yakrobot",
-            fleet_domain="yakrobot.com/finland",
+            # Fleet identity is assigned by whoever registers the robot on-chain, not
+            # claimed here — a gateway cannot verify whose fleet it belongs to. Left empty
+            # so the descriptor carries no unverified claim; the registrar fills it in.
+            fleet_provider="",
+            fleet_domain="",
             # Not participating in the task marketplace. Enabling it means
             # setting BiddingTerms here and implementing bid()/execute() — both
             # are commercial decisions (what tasks, at what price), not
