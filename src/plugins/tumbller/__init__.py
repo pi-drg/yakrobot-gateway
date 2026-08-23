@@ -11,8 +11,11 @@ class TumbllerPlugin(RobotPlugin):
             description="A physical ESP32-S3 two-wheeled robot controllable via MCP.",
             robot_type="differential_drive",
             url_prefix="tumbller",
-            fleet_provider="yakrobot",
-            fleet_domain="yakrobot.com/finland",
+            # Fleet identity is assigned by whoever registers the robot on-chain, not
+            # claimed here — a gateway cannot verify whose fleet it belongs to. Left empty
+            # so the descriptor carries no unverified claim; the registrar fills it in.
+            fleet_provider="",
+            fleet_domain="",
             bidding_terms=BiddingTerms(
                 min_price_cents=40,
                 rate_per_minute_cents=10,
