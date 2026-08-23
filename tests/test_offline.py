@@ -121,3 +121,118 @@ def test_build_descriptor_without_domain_omits_urls():
     d = build_descriptor(_fakerobot_plugins()["fakerobot"])
     assert d.mcp_endpoint == ""
     assert d.fleet_endpoint == ""
+
+
+# --------------------------------------------------------------------------
+# GET /{robot}/descriptor — the same document, served live
+#
+# Every test drives the route through create_gateway rather than a bare FastAPI
+# app: the failure it is guarding against is registration *order*, and that only
+# shows up once app.mount("/{robot}") is claiming the prefix.
+# --------------------------------------------------------------------------
+def _gateway_client(monkeypatch):
+    from starlette.testclient import TestClient
+    from core.server import create_gateway
+
+    # A developer's real tunnel domain must not decide what these assert on.
+    monkeypatch.delenv("NGROK_DOMAIN", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_DOMAIN", raising=False)
+    return TestClient(create_gateway(_fakerobot_plugins()))
+
+
+def _assert_cors(response):
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "GET" in response.headers["access-control-allow-methods"]
+    # The page must be able to send this past free-tier ngrok's interstitial.
+    assert "ngrok-skip-browser-warning" in response.headers["access-control-allow-headers"]
+
+
+def test_descriptor_route_survives_the_mounts(monkeypatch):
+    pytest.importorskip("yakrobot_descriptor")
+    with _gateway_client(monkeypatch) as client:
+        r = client.get("/fakerobot/descriptor")
+        assert r.status_code == 200, "shadowed by app.mount — registered after the mounts?"
+        body = r.json()
+        assert body["name"]
+        # No env domain set, so the Host header resolved the public endpoints.
+        assert body["mcp_endpoint"] == "https://testserver/fakerobot/mcp"
+        assert body["fleet_endpoint"] == "https://testserver/fleet/mcp"
+        _assert_cors(r)
+
+
+def test_descriptor_route_prefers_env_domain(monkeypatch):
+    pytest.importorskip("yakrobot_descriptor")
+    with _gateway_client(monkeypatch) as client:
+        monkeypatch.setenv("NGROK_DOMAIN", "demo.ngrok.app")
+        r = client.get("/fakerobot/descriptor")
+        assert r.json()["mcp_endpoint"] == "https://demo.ngrok.app/fakerobot/mcp"
+
+
+def test_descriptor_route_answers_preflight(monkeypatch):
+    with _gateway_client(monkeypatch) as client:
+        r = client.options("/fakerobot/descriptor")
+        assert r.status_code == 204
+        _assert_cors(r)
+
+
+def test_descriptor_route_unknown_robot_is_404_and_still_readable(monkeypatch):
+    with _gateway_client(monkeypatch) as client:
+        r = client.get("/nosuchrobot/descriptor")
+        assert r.status_code == 404
+        # Errors carry CORS too, or the browser sees an opaque failure instead of why.
+        _assert_cors(r)
+
+
+def test_descriptor_route_501_without_the_export_extra(monkeypatch):
+    import sys
+
+    # Make `import yakrobot_descriptor` raise, and force core.descriptor to be
+    # imported afresh so it actually goes looking.
+    monkeypatch.setitem(sys.modules, "yakrobot_descriptor", None)
+    monkeypatch.delitem(sys.modules, "core.descriptor", raising=False)
+    with _gateway_client(monkeypatch) as client:
+        r = client.get("/fakerobot/descriptor")
+        assert r.status_code == 501
+        assert "--extra export" in r.json()["detail"]
+        _assert_cors(r)
+
+
+def test_descriptor_route_503_when_no_public_host(monkeypatch):
+    pytest.importorskip("yakrobot_descriptor")
+    from core import descriptor_route
+
+    # No env domain and no Host header. Refusing beats emitting a descriptor whose
+    # mcp_endpoint is "" — that registers cleanly and resolves to nothing.
+    monkeypatch.setattr(descriptor_route, "_public_domain", lambda request: "")
+    with _gateway_client(monkeypatch) as client:
+        r = client.get("/fakerobot/descriptor")
+        assert r.status_code == 503
+        _assert_cors(r)
+
+
+def test_public_domain_precedence(monkeypatch):
+    from starlette.requests import Request
+    from core.descriptor_route import _public_domain
+
+    def request_with_host(host):
+        headers = [(b"host", host.encode())] if host else []
+        return Request({"type": "http", "headers": headers})
+
+    monkeypatch.delenv("NGROK_DOMAIN", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_DOMAIN", raising=False)
+    assert _public_domain(request_with_host("tunnel.example:8000")) == "tunnel.example:8000"
+    assert _public_domain(request_with_host("")) == ""
+
+    monkeypatch.setenv("CLOUDFLARE_DOMAIN", "cf.example")
+    assert _public_domain(request_with_host("tunnel.example")) == "cf.example"
+    monkeypatch.setenv("NGROK_DOMAIN", "ngrok.example")
+    assert _public_domain(request_with_host("tunnel.example")) == "ngrok.example"
+
+
+def test_index_advertises_the_descriptor_endpoint(monkeypatch):
+    with _gateway_client(monkeypatch) as client:
+        r = client.get("/")
+        assert r.json()["robots"]["fakerobot"]["descriptor_endpoint"] == "/fakerobot/descriptor"
+        # The page is handed a bare tunnel root and reads this cross-origin first.
+        _assert_cors(r)
+        _assert_cors(client.options("/"))

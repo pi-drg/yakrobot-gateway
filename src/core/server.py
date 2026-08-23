@@ -3,7 +3,8 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
@@ -199,37 +200,53 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
 
     app = FastAPI(title="Robot Fleet Gateway", lifespan=lifespan)
 
-    # Browser teleop: the driving console and the realtime socket proxy to each
-    # robot's own control server. Both registered BEFORE the mounts below —
-    # Starlette matches in registration order, and app.mount("/{name}") claims
-    # every path beneath it, so mounting first makes these dead code.
+    # Everything the gateway serves under a robot's own prefix: the realtime socket
+    # proxy to its control server, the driving console, and its descriptor JSON. All
+    # three registered BEFORE the mounts below — Starlette matches in registration
+    # order, and app.mount("/{name}") claims every path beneath it, so mounting first
+    # makes these dead code.
     from core.console import register_console
+    from core.descriptor_route import CORS_HEADERS, register_descriptor_route
     from core.ws_proxy import register_ws_proxy
 
     register_ws_proxy(app, plugins)
     register_console(app, plugins)
+    register_descriptor_route(app, plugins)
 
     for name, mcp_app in mcp_apps.items():
         app.mount(f"/{name}", mcp_app)
 
+    # The index carries the same CORS headers as /{robot}/descriptor, and for the same
+    # caller: the registration page is handed a bare tunnel root and reads this route to
+    # discover which robots are here before fetching any descriptor. Without the headers
+    # (and the preflight, which ngrok-skip-browser-warning forces) descriptor_endpoint
+    # below would be unreachable from the only client that wants it.
+    @app.options("/")
+    async def index_preflight():
+        return Response(status_code=204, headers=CORS_HEADERS)
+
     @app.get("/")
     async def index():
-        return {
-            "service": "Robot Fleet Gateway",
-            "robots": {
-                name: {
-                    "mcp_endpoint": f"/{name}/mcp",
-                    # Present only for robots with a realtime control server —
-                    # its absence is how a caller knows this one cannot be driven
-                    # from a browser.
-                    **({"ui_endpoint": f"/{name}/ui"} if plugin.control_base_urls() else {}),
-                    "tools": plugin.tool_names(),
-                    "reservation": registry.status(name),
-                }
-                for name, plugin in plugins.items()
+        return JSONResponse(
+            {
+                "service": "Robot Fleet Gateway",
+                "robots": {
+                    name: {
+                        "mcp_endpoint": f"/{name}/mcp",
+                        "descriptor_endpoint": f"/{name}/descriptor",
+                        # Present only for robots with a realtime control server —
+                        # its absence is how a caller knows this one cannot be driven
+                        # from a browser.
+                        **({"ui_endpoint": f"/{name}/ui"} if plugin.control_base_urls() else {}),
+                        "tools": plugin.tool_names(),
+                        "reservation": registry.status(name),
+                    }
+                    for name, plugin in plugins.items()
+                },
+                "fleet_endpoint": "/fleet/mcp",
             },
-            "fleet_endpoint": "/fleet/mcp",
-        }
+            headers=CORS_HEADERS,
+        )
 
     return app
 

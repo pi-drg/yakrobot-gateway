@@ -1,10 +1,14 @@
 """Build a robot plugin's ``RobotDescriptor`` — the gateway's producer side of the
 shared ``yakrobot-descriptor`` contract.
 
-This module imports ``yakrobot_descriptor`` (the ``export`` extra). It is imported only
-by ``scripts/export_descriptor.py``, never by the serving path, so serving a robot does
-not require the contract package. Registration itself happens in yakrobot-identity, fed
-the JSON this produces — this repo holds no chain code.
+This module imports ``yakrobot_descriptor`` (the ``export`` extra), so it stays optional
+for a gateway that only drives hardware: the CLI's ``export`` command imports it eagerly,
+and ``core.descriptor_route`` imports it **lazily inside the request handler** and answers
+501 when the extra is absent. Nothing at import time in the serving path reaches it.
+
+The JSON this produces is the whole of the gateway's contribution to on-chain identity —
+registration is a transaction signed by a browser wallet, and this repo holds no chain
+code.
 """
 
 from yakrobot_descriptor import RobotDescriptor, BiddingTerms
