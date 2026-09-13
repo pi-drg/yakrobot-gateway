@@ -200,7 +200,7 @@ async def _pump_to_browser(ws: WebSocket, robot) -> None:
             await ws.send_bytes(message)
 
 
-def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin]) -> None:
+def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin], reachability) -> None:
     """Add ``/{robot}/ws/{path}`` to the gateway.
 
     **Must be called before the per-robot MCP apps are mounted.** Starlette
@@ -268,6 +268,7 @@ def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin]) -> None:
             # name can absorb the whole connect timeout, and an entry stamped
             # with the pre-sweep clock would already have expired on arrival.
             offline_until[robot] = loop.time() + OFFLINE_CACHE_S
+            reachability.mark(robot, False)
             # Once per outage, not once per retry — a console reconnecting on a
             # timer would otherwise bury every other line in the log.
             if robot not in offline_logged:
@@ -280,6 +281,7 @@ def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin]) -> None:
             return
 
         offline_until.pop(robot, None)
+        reachability.mark(robot, True)
         if robot in offline_logged:
             offline_logged.discard(robot)
             # Warning, not info, purely so it is visible: uvicorn leaves this

@@ -324,6 +324,93 @@ def test_wrong_static_token_refusal_reaches_client():
     asyncio.run(run())
 
 
+async def _poll_online(client, url, robot, want, attempts=30, interval=0.1):
+    """Poll the index until `online` reaches `want`, or return the last value seen.
+
+    The probe runs once immediately on startup, but that first pass races the
+    lifespan's own startup — a caller hitting `/` in the same instant can still see
+    the pre-probe `null`, so tests must poll rather than assert on the first read.
+    """
+    online = None
+    for _ in range(attempts):
+        r = await client.get(url)
+        online = r.json()["robots"][robot]["online"]
+        if online == want:
+            return online
+        await asyncio.sleep(interval)
+    return online
+
+
+def test_index_reports_robot_online_when_simulator_up():
+    async def run():
+        import httpx
+        from core import reachability
+
+        reachability.PROBE_INTERVAL_S = 0.2
+        try:
+            async with _Stack():
+                async with httpx.AsyncClient() as client:
+                    online = await _poll_online(
+                        client, f"http://127.0.0.1:{GW_PORT}/", "fakerobot_picar", True
+                    )
+                    assert online is True
+        finally:
+            reachability.PROBE_INTERVAL_S = 15.0
+
+    asyncio.run(run())
+
+
+def test_index_reports_robot_offline_when_unreachable():
+    async def run():
+        import httpx
+        from core import reachability
+        from core.server import create_gateway
+        from yakrobot_cli.commands import _load_plugins
+
+        reachability.PROBE_INTERVAL_S = 0.2
+        # Nothing listens here — the way a robot looks when it is switched off.
+        os.environ["FAKEROBOT_PICAR_URL"] = "http://127.0.0.1:9"
+        _clear_auth_env()
+        port = GW_PORT + 2
+        try:
+            server, task = await _serve(create_gateway(_load_plugins(["fakerobot_picar"])), port)
+            try:
+                async with httpx.AsyncClient() as client:
+                    online = await _poll_online(
+                        client, f"http://127.0.0.1:{port}/", "fakerobot_picar", False
+                    )
+                    assert online is False
+            finally:
+                server.should_exit = True
+                await task
+        finally:
+            os.environ["FAKEROBOT_PICAR_URL"] = f"http://127.0.0.1:{SIM_PORT}"
+            reachability.PROBE_INTERVAL_S = 15.0
+
+    asyncio.run(run())
+
+
+def test_index_online_null_for_robot_without_control_server():
+    """fakerobot exposes no realtime control server, so it is never probed."""
+    async def run():
+        import httpx
+        from core.server import create_gateway
+        from yakrobot_cli.commands import _load_plugins
+
+        _clear_auth_env()
+        port = GW_PORT + 3
+        server, task = await _serve(create_gateway(_load_plugins(["fakerobot"])), port)
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"http://127.0.0.1:{port}/")
+                assert r.json()["robots"]["fakerobot"]["online"] is None
+        finally:
+            server.should_exit = True
+            await task
+
+    asyncio.run(run())
+
+
 def test_video_can_be_disabled_gateway_wide():
     """VIDEO_ENABLED=0 refuses video for every client but keeps control working."""
     async def run():
