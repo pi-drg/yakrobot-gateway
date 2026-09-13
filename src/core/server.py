@@ -177,7 +177,19 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     StreamableHTTPSessionManager task group. We compose all lifespans
     into the gateway's lifespan.
     """
+    from core.payments_config import PaymentsConfigError, index_summary, load_payments_config
     from core.reservation import ReservationRegistry
+
+    # Validated first, so a bad payments config fails before anything is served —
+    # paid-teleop-execution.md §0.1/step 0.3.
+    payments_cfg = load_payments_config()
+    if payments_cfg.enabled:
+        try:
+            import eth_keys  # noqa: F401
+        except ImportError:
+            raise PaymentsConfigError(
+                "PAYMENTS_ENABLED=1 needs: uv sync --extra payments"
+            ) from None
 
     registry = ReservationRegistry()  # shared across every robot server + the index
 
@@ -199,6 +211,8 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
             yield
 
     app = FastAPI(title="Robot Fleet Gateway", lifespan=lifespan)
+    app.state.registry = registry
+    app.state.payments = payments_cfg
 
     # Everything the gateway serves under a robot's own prefix: the realtime socket
     # proxy to its control server, the driving console, and its descriptor JSON. All
@@ -230,6 +244,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
         return JSONResponse(
             {
                 "service": "Robot Fleet Gateway",
+                "payments": index_summary(payments_cfg),
                 "robots": {
                     name: {
                         "mcp_endpoint": f"/{name}/mcp",

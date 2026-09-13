@@ -278,6 +278,22 @@ def test_console_served_for_drivable_robots_only():
         assert "ui_endpoint" not in index["robots"]["fakerobot"]
 
 
+def test_index_reports_payments_disabled_by_default():
+    async def run():
+        import httpx
+
+        for key in ("PAYMENTS_ENABLED", "PAYMENTS_URL", "PAYMENTS_ISSUER",
+                    "TELEOP_PRICE_USDC", "TELEOP_LEASE_MINUTES"):
+            os.environ.pop(key, None)
+
+        async with _Stack():
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                assert r.json()["payments"] == {"enabled": False}
+
+    asyncio.run(run())
+
+
 def test_video_can_be_disabled_gateway_wide():
     """VIDEO_ENABLED=0 refuses video for every client but keeps control working."""
     async def run():

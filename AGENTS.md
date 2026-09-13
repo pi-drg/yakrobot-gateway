@@ -201,11 +201,22 @@ Serving:
 - `VIDEO_ENABLED` — (optional) set `0`/`false`/`no`/`off` to refuse `/ws/video` for every
   client, for a metered or congested link. Control keeps working: the car stays drivable,
   just blind. Absent means enabled.
-- Payments/marketplace secrets (Stripe, …) live in `yakrobot-marketplace`, not here.
+- Task auctions and Stripe payments live in `yakrobot-marketplace`, not here.
+- **Paid teleop** (optional — off by default): `PAYMENTS_ENABLED` (`0`/`1`; unset means
+  today's behaviour — no capability checks, no paywall), `PAYMENTS_URL` (the
+  `yakrobot-payments` service selling leases for this gateway), `PAYMENTS_ISSUER` (its
+  signing key's address — capabilities are verified by recovering the signer, never by
+  calling out to the service), `TELEOP_PRICE_USDC` (default `1.00`), `TELEOP_LEASE_MINUTES`
+  (default `5`). Validated at startup and reported on the `/` index
+  (`core.payments_config`). Full rules: `plans/paid-teleop-execution.md` §0.1 in the
+  `pi-drg` planning repo.
 
 There are **no chain secrets** in this repo or in `yakrobot-identity`: registration and
 attestation are signed by a browser wallet, and the identity package is read-only. If a
-task seems to need `SIGNER_PVT_KEY` or `PINATA_JWT` here, it is in the wrong repo.
+task seems to need `SIGNER_PVT_KEY` or `PINATA_JWT` here, it is in the wrong repo. The
+`payments` extra is the one exception worth naming explicitly: it adds `eth-keys` solely
+to recover the signer of a paid-teleop capability and compare it to `PAYMENTS_ISSUER` — no
+RPC, no provider, no private key, so it does not violate the rule above.
 
 ## Development Guidelines
 
