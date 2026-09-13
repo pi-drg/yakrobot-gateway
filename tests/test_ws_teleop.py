@@ -93,11 +93,16 @@ class _Stack:
         self._env_overrides = env or {}
 
     async def __aenter__(self):
-        # Import BEFORE clearing env: core.server's module-level load_dotenv() only runs
-        # once per process (Python caches the import), so clearing first would let it
-        # repopulate whatever we just cleared from a developer's real .env the moment
-        # something below imports core.server for the first time.
+        # Import BEFORE clearing env: both core.server AND yakrobot_cli (imported below
+        # for _load_plugins) call load_dotenv() at module level, and each only runs once
+        # per process (Python caches the import). Clearing first would let whichever of
+        # the two hasn't been imported yet repopulate what we just cleared from a
+        # developer's real .env the moment something below imports it for the first
+        # time — this bit a test that filtered to run alone (`pytest -k`), where it was
+        # the very first _Stack in the process, while full-suite runs hid it: an earlier
+        # test happened to import both modules first, with no assertion sensitive to it.
         import core.server  # noqa: F401
+        import yakrobot_cli  # noqa: F401
 
         os.environ["FAKEROBOT_PICAR_URL"] = f"http://127.0.0.1:{SIM_PORT}"
         _clear_auth_env()
@@ -679,5 +684,23 @@ def test_video_socket_also_requires_capability():
         _, issuer = _new_issuer()
         async with _Stack(env=_payments_env(issuer)) as stack:
             assert await _refusal(stack.video) == (1008, "payment required")
+
+    asyncio.run(run())
+
+
+def test_capability_admits_both_sockets():
+    """The golden path the console actually hits: one lease, both sockets. reserve()
+    for the same lease: holder must be idempotent, not just "not held by someone else"."""
+    async def run():
+        from websockets.asyncio.client import connect
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            token = mint(_capability_claims(), pk.to_hex())
+            async with connect(f"{stack.control}?token={token}") as control_ws:
+                assert (await _recv_json(control_ws))["type"] == "hello"
+                async with connect(f"{stack.video}?token={token}") as video_ws:
+                    frame = await asyncio.wait_for(video_ws.recv(), timeout=5)
+                    assert isinstance(frame, bytes) and frame[:2] == b"\xff\xd8"
 
     asyncio.run(run())
