@@ -233,7 +233,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     from core.descriptor_route import CORS_HEADERS, register_descriptor_route
     from core.ws_proxy import register_ws_proxy
 
-    register_ws_proxy(app, plugins, reachability)
+    register_ws_proxy(app, plugins, registry, reachability, payments_cfg)
     register_console(app, plugins)
     register_descriptor_route(app, plugins)
 

@@ -12,6 +12,7 @@ import io
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,43 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from capability_helper import mint  # noqa: E402
+
 SIM_PORT, GW_PORT = 8191, 8192
+
+
+def _new_issuer():
+    """A fresh secp256k1 keypair, so each test's PAYMENTS_ISSUER is independent."""
+    from eth_keys import keys
+
+    pk = keys.PrivateKey(os.urandom(32))
+    return pk, pk.public_key.to_checksum_address().lower()
+
+
+def _payments_env(issuer: str, **overrides) -> dict[str, str]:
+    env = {
+        "PAYMENTS_ENABLED": "1",
+        "PAYMENTS_URL": "http://127.0.0.1:9",  # never dialed — the gateway only verifies
+        "PAYMENTS_ISSUER": issuer,
+        "TELEOP_LEASE_MINUTES": "5",
+    }
+    env.update(overrides)
+    return env
+
+
+def _capability_claims(**overrides) -> dict:
+    now = int(time.time())
+    claims = {
+        "v": 1,
+        "robot": "fakerobot_picar",
+        "gateway": f"127.0.0.1:{GW_PORT}",
+        "lease": "22222222-2222-4222-8222-222222222222",
+        "payer": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "iat": now,
+        "exp": now + 300,
+    }
+    claims.update(overrides)
+    return claims
 
 
 # Cleared before every _Stack, so a developer's real .env (loaded once, at whichever
@@ -431,5 +468,216 @@ def test_video_can_be_disabled_gateway_wide():
                     assert (await _recv_json(ws))["type"] == "hello"
         finally:
             os.environ.pop("VIDEO_ENABLED", None)
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------
+# Paid teleop — capability admission, reservation binding, expiry.
+# paid-teleop-execution.md phase 2, step 2.2.
+# --------------------------------------------------------------------------
+
+def test_payments_disabled_keeps_todays_behaviour():
+    async def run():
+        from websockets.asyncio.client import connect
+
+        async with _Stack() as stack:
+            async with connect(stack.control) as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+
+    asyncio.run(run())
+
+
+def test_no_token_refused_when_payments_enabled():
+    async def run():
+        _, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            assert await _refusal(stack.control) == (1008, "payment required")
+
+    asyncio.run(run())
+
+
+def test_valid_capability_admits_and_reserves():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            claims = _capability_claims()
+            token = mint(claims, pk.to_hex())
+            async with connect(f"{stack.control}?token={token}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                    reservation = r.json()["robots"]["fakerobot_picar"]["reservation"]
+                    assert reservation["holder"] == f"lease:{claims['lease']}"
+
+    asyncio.run(run())
+
+
+def test_capability_for_other_robot_refused():
+    async def run():
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            token = mint(_capability_claims(robot="some_other_robot"), pk.to_hex())
+            code, reason = await _refusal(f"{stack.control}?token={token}")
+            assert (code, reason) == (1008, "lease is for another robot")
+
+    asyncio.run(run())
+
+
+def test_capability_for_other_gateway_refused():
+    async def run():
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            token = mint(_capability_claims(gateway="pay.example.com"), pk.to_hex())
+            code, reason = await _refusal(f"{stack.control}?token={token}")
+            assert (code, reason) == (1008, "lease is for another gateway")
+
+    asyncio.run(run())
+
+
+def test_expired_capability_refused():
+    async def run():
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            now = int(time.time())
+            # A valid, well-formed lease that has simply run out — verify() itself only
+            # checks iat/duration; ws_proxy is what checks exp against the clock.
+            token = mint(_capability_claims(iat=now - 400, exp=now - 100), pk.to_hex())
+            code, reason = await _refusal(f"{stack.control}?token={token}")
+            assert (code, reason) == (1008, "lease expired")
+
+    asyncio.run(run())
+
+
+def test_wrong_issuer_refused():
+    async def run():
+        _, issuer = _new_issuer()
+        wrong_pk, _ = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            # Signed by a different key than PAYMENTS_ISSUER — recovers to the wrong
+            # address, so verify() folds it into the single "invalid lease" reason.
+            token = mint(_capability_claims(), wrong_pk.to_hex())
+            code, reason = await _refusal(f"{stack.control}?token={token}")
+            assert (code, reason) == (1008, "invalid lease")
+
+    asyncio.run(run())
+
+
+def test_overlong_capability_refused():
+    async def run():
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer, TELEOP_LEASE_MINUTES="5")) as stack:
+            now = int(time.time())
+            # 6 minutes > 5*60 + 30s leeway.
+            token = mint(_capability_claims(iat=now, exp=now + 6 * 60), pk.to_hex())
+            code, reason = await _refusal(f"{stack.control}?token={token}")
+            assert (code, reason) == (1008, "invalid lease")
+
+    asyncio.run(run())
+
+
+def test_capability_refused_while_agent_holds_reservation():
+    async def run():
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            stack.app.state.registry.reserve("fakerobot_picar", "marketplace")
+            token = mint(_capability_claims(), pk.to_hex())
+            code, reason = await _refusal(f"{stack.control}?token={token}")
+            assert (code, reason) == (1008, "robot is held by another session")
+
+    asyncio.run(run())
+
+
+def test_static_mcp_token_admits_and_reserves():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        _, issuer = _new_issuer()
+        env = _payments_env(issuer, MCP_TOKENS="operator=tok_def")
+        async with _Stack(env=env) as stack:
+            async with connect(f"{stack.control}?token=tok_def") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                    reservation = r.json()["robots"]["fakerobot_picar"]["reservation"]
+                    assert reservation["holder"] == "operator"
+
+    asyncio.run(run())
+
+
+def test_static_token_reservation_released_on_close():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        _, issuer = _new_issuer()
+        env = _payments_env(issuer, MCP_TOKENS="operator=tok_def")
+        async with _Stack(env=env) as stack:
+            async with connect(f"{stack.control}?token=tok_def") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                assert r.json()["robots"]["fakerobot_picar"]["reservation"] == {"reserved": False}
+
+    asyncio.run(run())
+
+
+def test_socket_closes_at_exp():
+    async def run():
+        from websockets.asyncio.client import connect
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            now = int(time.time())
+            token = mint(_capability_claims(iat=now, exp=now + 2), pk.to_hex())
+            async with connect(f"{stack.control}?token={token}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+                with pytest.raises(Exception):
+                    await asyncio.wait_for(ws.recv(), timeout=5)
+                assert ws.close_code == 1008
+                assert ws.close_reason == "lease expired"
+
+    asyncio.run(run())
+
+
+def test_reservation_survives_reconnect():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            claims = _capability_claims()
+            token = mint(claims, pk.to_hex())
+
+            async with connect(f"{stack.control}?token={token}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+            # Let the simulator notice the disconnect and free its own driver slot
+            # before reconnecting — same reasoning as test_disconnect_stops_the_robot.
+            await asyncio.sleep(0.4)
+
+            async with connect(f"{stack.control}?token={token}") as ws2:
+                assert (await _recv_json(ws2))["type"] == "hello"
+
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                reservation = r.json()["robots"]["fakerobot_picar"]["reservation"]
+                assert reservation["holder"] == f"lease:{claims['lease']}"
+
+    asyncio.run(run())
+
+
+def test_video_socket_also_requires_capability():
+    async def run():
+        _, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            assert await _refusal(stack.video) == (1008, "payment required")
 
     asyncio.run(run())

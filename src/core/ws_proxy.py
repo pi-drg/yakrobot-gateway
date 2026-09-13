@@ -29,22 +29,35 @@ safety model that lives on the robot:
    backstop, but a half-open socket held after the browser vanishes delays the
    robot's own ``stop()``-on-disconnect. When either side ends, the other is
    torn down immediately.
-3. **No state of its own.** Deadman, duty caps and the single-driver slot are
-   enforced on the robot, where the hardware is. This module adds none of them
-   and must not start. The brief reachability cache below is not an exception:
-   it remembers only that a connect just failed, which changes how quickly a
-   refusal is returned, never what the robot is permitted to do.
+3. **No *safety* state of its own.** Deadman, duty caps and the single-driver
+   slot are enforced on the robot, where the hardware is — a gateway that
+   believes it stopped a car it cannot reach is worse than one that never
+   claimed to. This module adds none of them and must not start.
+
+   This is narrower than "no state at all." **Admission state** — who is
+   allowed to open a socket here — is already this module's job, decided
+   with a static token set (below). A paid-teleop capability
+   (paid-teleop-access.md §2) is the same decision with an expiry and a name
+   attached: it is verified here, and the resulting hold on the robot is
+   recorded in the *reservation registry* — the gateway's existing per-robot
+   arbiter, shared with MCP agents — not invented fresh. The brief
+   reachability cache below is a third, narrower thing again: it remembers
+   only that a connect just failed, which changes how quickly a refusal is
+   returned, never what the robot is permitted to do.
 """
 
 import asyncio
 import logging
 import os
+import time
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 import websockets
 from fastapi import FastAPI
 from starlette.websockets import WebSocket
 
+from core.capability import CapabilityError, normalize_host, verify
+from core.descriptor_route import _public_domain
 from core.plugin import RobotPlugin
 
 logger = logging.getLogger(__name__)
@@ -64,6 +77,11 @@ CONNECT_TIMEOUT_S = 5.0
 # every retry re-runs the whole candidate list and its connect timeouts. Short
 # enough that a robot finishing its boot is picked up on the next retry.
 OFFLINE_CACHE_S = 3.0
+
+# How often a static-token /ws/control socket renews its reservation while open.
+# The registry's default TTL (reservation.SESSION_TTL, 300s) would otherwise lapse
+# mid-drive and hand the robot to an agent — paid-teleop-execution.md §0.5.
+RESERVATION_RENEW_S = 60.0
 
 
 def _ws_url(base_url: str, path: str, query: str) -> str:
@@ -127,6 +145,28 @@ def _gateway_tokens() -> set[str]:
     from core.server import _load_tokens
 
     return set(_load_tokens())
+
+
+def _gateway_token_clients() -> dict[str, str]:
+    """``token -> client_id`` for every admit source ``_make_auth`` would use.
+
+    ``_gateway_tokens()`` above (the disabled-payments path, unchanged since it predates
+    this) only ever reads ``MCP_TOKENS``/``MCP_BEARER_TOKEN``. The paid-teleop admit path
+    (paid-teleop-execution.md §0.5) must also accept ``MCP_TOKENS_FILE``, and needs the
+    ``client_id`` each token maps to — that is who the reservation is for — so this
+    mirrors ``core.server._make_auth``'s precedence (file if set, else env) instead of
+    reusing ``_gateway_tokens()``.
+    """
+    from core.server import _load_tokens, _parse_token_file
+
+    token_file = os.getenv("MCP_TOKENS_FILE", "").strip()
+    if token_file:
+        try:
+            raw = _parse_token_file(token_file)
+        except OSError:
+            return {}
+        return {token: info["client_id"] for token, info in raw.items()}
+    return {token: info["client_id"] for token, info in _load_tokens().items()}
 
 
 async def _connect_upstream(candidates: list[str], path: str, query: str):
@@ -200,7 +240,40 @@ async def _pump_to_browser(ws: WebSocket, robot) -> None:
             await ws.send_bytes(message)
 
 
-def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin], reachability) -> None:
+async def _close_at_expiry(ws: WebSocket, exp: int) -> None:
+    """Close a capability-admitted browser socket at its lease's ``exp``.
+
+    A handshake-time check alone would let one long-lived socket outlive its lease
+    indefinitely — this is what makes expiry safe by construction rather than by the
+    gateway doing anything clever: the robot's own deadman stops the car the moment this
+    closes (paid-teleop-access.md §3.1).
+    """
+    delay = exp - int(time.time())
+    if delay > 0:
+        await asyncio.sleep(delay)
+    try:
+        await ws.close(code=1008, reason="lease expired")
+    except Exception:
+        # Already closed by the peer, or the socket is already gone — same reasoning as
+        # every other best-effort close in this module.
+        pass
+
+
+async def _renew_reservation(registry, robot: str, client_id: str) -> None:
+    """Keep a static-token /ws/control reservation alive for as long as the socket is
+    open. See ``RESERVATION_RENEW_S``."""
+    while True:
+        await asyncio.sleep(RESERVATION_RENEW_S)
+        registry.reserve(robot, client_id)
+
+
+def register_ws_proxy(
+    app: FastAPI,
+    plugins: dict[str, RobotPlugin],
+    registry,
+    reachability,
+    payments,
+) -> None:
     """Add ``/{robot}/ws/{path}`` to the gateway.
 
     **Must be called before the per-robot MCP apps are mounted.** Starlette
@@ -237,21 +310,85 @@ def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin], reachabilit
             return
         candidates, robot_token = entry
 
-        if path.strip("/") == "video" and not video_enabled():
+        is_video = path.strip("/") == "video"
+
+        if is_video and not video_enabled():
             # 1008 (policy violation) rather than a generic error: the console
             # keys off this code to stop retrying, instead of reconnecting into
             # a refusal every second.
             await _refuse(ws, 1008, "video disabled on the gateway")
             return
 
-        gateway_tokens = _gateway_tokens()
-        if gateway_tokens:
+        # What the teardown below needs to know about *how* this socket was admitted:
+        # a capability closes itself at exp; a static /ws/control token renews its
+        # reservation while open and releases it when the socket closes.
+        expiry_at: int | None = None
+        renew_client_id: str | None = None
+        release_client_id: str | None = None
+
+        if payments.enabled:
+            # paid-teleop-execution.md §0.5, in order. Every branch below either admits
+            # (falling through to gateway_auth = True) or refuses and returns.
             supplied = dict(parse_qsl(ws.url.query, keep_blank_values=True)).get("token", "")
-            if supplied not in gateway_tokens:
-                await _refuse(ws, 1008, "unauthorized")
+            if not supplied:
+                await _refuse(ws, 1008, "payment required")
                 return
 
-        query = _upstream_query(ws.url.query, robot_token, bool(gateway_tokens))
+            static_clients = _gateway_token_clients()
+            if supplied in static_clients:
+                client_id = static_clients[supplied]
+                if is_video:
+                    # Does not reserve — admitted unless someone else already holds it.
+                    if registry.blocks(robot, client_id) is not None:
+                        await _refuse(ws, 1008, "robot is held by another session")
+                        return
+                else:
+                    if not registry.reserve(robot, client_id):
+                        await _refuse(ws, 1008, "robot is held by another session")
+                        return
+                    renew_client_id = client_id
+                    release_client_id = client_id
+            else:
+                try:
+                    claims = verify(
+                        supplied,
+                        payments.issuer,
+                        lease_minutes=payments.lease_minutes,
+                        now=int(time.time()),
+                    )
+                except CapabilityError as exc:
+                    await _refuse(ws, 1008, str(exc))
+                    return
+
+                if claims.robot != robot:
+                    await _refuse(ws, 1008, "lease is for another robot")
+                    return
+                if normalize_host(claims.gateway) != normalize_host(_public_domain(ws)):
+                    await _refuse(ws, 1008, "lease is for another gateway")
+                    return
+                now = int(time.time())
+                if claims.exp <= now:
+                    await _refuse(ws, 1008, "lease expired")
+                    return
+                # Two checks, not one: `now + leeway` decided verify()'s "iat/duration
+                # valid"; a zero-or-negative ttl here would hand the registry a lease it
+                # treats as instantly lapsed. Refused above instead.
+                if not registry.reserve(robot, f"lease:{claims.lease}", ttl=claims.exp - now):
+                    await _refuse(ws, 1008, "robot is held by another session")
+                    return
+                expiry_at = claims.exp
+
+            gateway_auth = True
+        else:
+            gateway_tokens = _gateway_tokens()
+            if gateway_tokens:
+                supplied = dict(parse_qsl(ws.url.query, keep_blank_values=True)).get("token", "")
+                if supplied not in gateway_tokens:
+                    await _refuse(ws, 1008, "unauthorized")
+                    return
+            gateway_auth = bool(gateway_tokens)
+
+        query = _upstream_query(ws.url.query, robot_token, gateway_auth)
 
         loop = asyncio.get_running_loop()
         if offline_until.get(robot, 0.0) > loop.time():
@@ -293,18 +430,31 @@ def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin], reachabilit
         await ws.accept()
         logger.info("ws proxy: %s/ws/%s <-> %s", robot, path, url)
 
+        # Started only now, after accept() — admission (including the reservation
+        # itself) happens earlier per §0.5's order, but a task tied to *this* socket
+        # must not be created until there is a socket, or a robot-offline refusal
+        # between admission and here would leak it.
+        extra_tasks = []
+        if expiry_at is not None:
+            extra_tasks.append(asyncio.create_task(_close_at_expiry(ws, expiry_at)))
+        if renew_client_id is not None:
+            extra_tasks.append(
+                asyncio.create_task(_renew_reservation(registry, robot, renew_client_id))
+            )
+
         async with robot_ws:
             tasks = [
                 asyncio.create_task(_pump_to_robot(ws, robot_ws)),
                 asyncio.create_task(_pump_to_browser(ws, robot_ws)),
+                *extra_tasks,
             ]
             try:
                 _, pending = await asyncio.wait(
                     tasks, return_when=asyncio.FIRST_COMPLETED
                 )
-                # One direction ended; the socket is finished either way. Tear
-                # the other down now rather than leaving the robot streaming
-                # video into a browser that has gone.
+                # One direction ended (or, for a capability, its expiry fired); the
+                # socket is finished either way. Tear the rest down now rather than
+                # leaving the robot streaming video into a browser that has gone.
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
@@ -316,4 +466,10 @@ def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin], reachabilit
                     # server's own socket machinery is half torn down. A browser
                     # vanishing mid-drive is routine teleop, not an incident.
                     pass
+                # A capability's reservation is deliberately NOT released here — it
+                # lapses at exp, so a reconnect on the same capability re-acquires it
+                # (§0.5). Only a static /ws/control token's reservation follows the
+                # socket.
+                if release_client_id is not None:
+                    registry.release(robot, release_client_id)
         logger.info("ws proxy: %s/ws/%s closed", robot, path)
