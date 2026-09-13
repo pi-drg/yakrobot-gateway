@@ -15,6 +15,7 @@ import os
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from starlette.requests import HTTPConnection
 
 from core.plugin import RobotPlugin
 
@@ -37,7 +38,7 @@ CORS_HEADERS = {
 _DOMAIN_ENV_VARS = ("NGROK_DOMAIN", "CLOUDFLARE_DOMAIN")
 
 
-def _public_domain(request: Request) -> str:
+def _public_domain(request: HTTPConnection) -> str:
     """Resolve the public host the descriptor's endpoints should point at.
 
     Same precedence as the ``export`` CLI (``$NGROK_DOMAIN`` then ``$CLOUDFLARE_DOMAIN``),
@@ -47,6 +48,11 @@ def _public_domain(request: Request) -> str:
 
     Read per-request rather than captured at startup, so a tunnel that comes up after the
     gateway does is picked up without a restart. Returns ``""`` if nothing resolves.
+
+    Takes ``HTTPConnection`` rather than ``Request`` — both ``Request`` and
+    ``WebSocket`` subclass it and expose the same ``.headers`` — so ``ws_proxy``'s
+    capability verification (paid-teleop-execution.md §0.5) can reuse this exact
+    resolution for a ``WebSocket`` instead of inventing a second one.
     """
     for var in _DOMAIN_ENV_VARS:
         value = os.getenv(var, "").strip()

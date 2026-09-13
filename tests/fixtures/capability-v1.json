@@ -1,0 +1,15 @@
+{
+  "private_key": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+  "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "claims": {
+    "v": 1,
+    "robot": "fakerobot_picar",
+    "gateway": "127.0.0.1:8192",
+    "lease": "00000000-0000-4000-8000-000000000001",
+    "payer": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+    "iat": 1757700000,
+    "exp": 1757700300
+  },
+  "canonical_payload": "{\"exp\":1757700300,\"gateway\":\"127.0.0.1:8192\",\"iat\":1757700000,\"lease\":\"00000000-0000-4000-8000-000000000001\",\"payer\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"robot\":\"fakerobot_picar\",\"v\":1}",
+  "token": "eyJleHAiOjE3NTc3MDAzMDAsImdhdGV3YXkiOiIxMjcuMC4wLjE6ODE5MiIsImlhdCI6MTc1NzcwMDAwMCwibGVhc2UiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJwYXllciI6IjB4NzA5OTc5NzBjNTE4MTJkYzNhMDEwYzdkMDFiNTBlMGQxN2RjNzljOCIsInJvYm90IjoiZmFrZXJvYm90X3BpY2FyIiwidiI6MX0.o9Kj0q-SiAPUF6yzKR7O90QOuqsCerUExd5nX_okxdA0gtN4Bcu9r8zwyZ9X7YbftSS7VK3ggHOvbBBjWZQotxw"
+}
