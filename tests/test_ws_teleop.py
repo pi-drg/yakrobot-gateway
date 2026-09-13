@@ -23,8 +23,18 @@ if str(SRC) not in sys.path:
 SIM_PORT, GW_PORT = 8191, 8192
 
 
+# Cleared before every _Stack, so a developer's real .env (loaded once, at whichever
+# test imports core.server first) never decides what these tests assert on.
+_CLEARED_ENV_VARS = (
+    "MCP_TOKENS", "MCP_BEARER_TOKEN", "MCP_TOKENS_FILE",
+    "NGROK_DOMAIN", "CLOUDFLARE_DOMAIN",
+    "PAYMENTS_ENABLED", "PAYMENTS_URL", "PAYMENTS_ISSUER",
+    "TELEOP_PRICE_USDC", "TELEOP_LEASE_MINUTES",
+)
+
+
 def _clear_auth_env():
-    for key in ("MCP_TOKENS", "MCP_BEARER_TOKEN", "MCP_TOKENS_FILE"):
+    for key in _CLEARED_ENV_VARS:
         os.environ.pop(key, None)
 
 
@@ -42,9 +52,20 @@ async def _serve(app, port):
 class _Stack:
     """Simulator + gateway, both on loopback, torn down together."""
 
+    def __init__(self, env: dict[str, str] | None = None):
+        self._env_overrides = env or {}
+
     async def __aenter__(self):
+        # Import BEFORE clearing env: core.server's module-level load_dotenv() only runs
+        # once per process (Python caches the import), so clearing first would let it
+        # repopulate whatever we just cleared from a developer's real .env the moment
+        # something below imports core.server for the first time.
+        import core.server  # noqa: F401
+
         os.environ["FAKEROBOT_PICAR_URL"] = f"http://127.0.0.1:{SIM_PORT}"
         _clear_auth_env()
+        for key, value in self._env_overrides.items():
+            os.environ[key] = value
 
         import plugins.fakerobot_picar.simulator as sim
         from core.server import create_gateway
@@ -52,9 +73,10 @@ class _Stack:
 
         self.sim = sim
         sim.STATE = sim.SimState()  # fresh state per test; module globals are read at call time
+        self.app = create_gateway(_load_plugins(["fakerobot_picar"]))
         self._servers = [
             await _serve(sim.app, SIM_PORT),
-            await _serve(create_gateway(_load_plugins(["fakerobot_picar"])), GW_PORT),
+            await _serve(self.app, GW_PORT),
         ]
         self.control = f"ws://127.0.0.1:{GW_PORT}/fakerobot_picar/ws/control"
         self.video = f"ws://127.0.0.1:{GW_PORT}/fakerobot_picar/ws/video"
@@ -282,14 +304,22 @@ def test_index_reports_payments_disabled_by_default():
     async def run():
         import httpx
 
-        for key in ("PAYMENTS_ENABLED", "PAYMENTS_URL", "PAYMENTS_ISSUER",
-                    "TELEOP_PRICE_USDC", "TELEOP_LEASE_MINUTES"):
-            os.environ.pop(key, None)
-
         async with _Stack():
             async with httpx.AsyncClient() as client:
                 r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
                 assert r.json()["payments"] == {"enabled": False}
+
+    asyncio.run(run())
+
+
+def test_wrong_static_token_refusal_reaches_client():
+    """core/ws_proxy.py's unauthorized branch must go through _refuse(), not a bare
+    ws.close() before accept() — otherwise the browser only ever sees 1006."""
+    async def run():
+        async with _Stack(env={"MCP_TOKENS": "teleop-ui=tok_def"}) as stack:
+            code, reason = await _refusal(stack.control + "?token=wrongtoken")
+            assert code == 1008
+            assert reason == "unauthorized"
 
     asyncio.run(run())
 

@@ -248,7 +248,7 @@ def register_ws_proxy(app: FastAPI, plugins: dict[str, RobotPlugin]) -> None:
         if gateway_tokens:
             supplied = dict(parse_qsl(ws.url.query, keep_blank_values=True)).get("token", "")
             if supplied not in gateway_tokens:
-                await ws.close(code=1008, reason="unauthorized")
+                await _refuse(ws, 1008, "unauthorized")
                 return
 
         query = _upstream_query(ws.url.query, robot_token, bool(gateway_tokens))
