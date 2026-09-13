@@ -26,15 +26,24 @@ fakerobot-picar = ["httpx>=0.28.1", "pillow>=11.0", "numpy>=2.0"]
 # On-chain registration itself happens in yakrobot-identity, fed that JSON — this
 # gateway only produces the descriptor and holds no chain code.
 export = ["yakrobot-descriptor[model]"]
-all = ["httpx>=0.28.1", "djitellopy>=2.5.0", "pillow>=11.0", "numpy>=2.0"]
+# Recovers the signer of a paid-teleop capability against PAYMENTS_ISSUER — signature
+# verification only: no RPC, no provider, no private key. See AGENTS.md.
+payments = ["eth-keys>=0.7", "eth-hash[pycryptodome]>=0.7"]
+all = [
+    "httpx>=0.28.1", "djitellopy>=2.5.0", "pillow>=11.0", "numpy>=2.0",
+    "eth-keys>=0.7", "eth-hash[pycryptodome]>=0.7",
+]
 # Tests use the fakerobot plugins (httpx, and pillow/numpy for the PiCar
-# simulator's video stream) and the descriptor exporter (Pydantic model).
+# simulator's video stream), the descriptor exporter (Pydantic model), and the
+# payments extra (capability fixtures/tests).
 dev = [
     "pytest>=8.0",
     "httpx>=0.28.1",
     "pillow>=11.0",
     "numpy>=2.0",
     "yakrobot-descriptor[model]",
+    "eth-keys>=0.7",
+    "eth-hash[pycryptodome]>=0.7",
 ]
 
 [project.scripts]
