@@ -110,6 +110,14 @@
     background: rgb(255 255 255 / .22); border-radius: 4px; padding: 2px 6px;
   }
 
+  /* Someone else already holds this robot's gateway reservation — an MCP agent
+     mid-task, or later a paid lease. Information only; it never disables controls. */
+  .reserve-banner {
+    padding: 8px 20px; font-size: 13px; text-align: center;
+    background: var(--accent-bg); color: var(--accent);
+    border-bottom: 1px solid var(--hairline);
+  }
+
   /* ---------- layout ---------- */
   main {
     flex: 1; min-height: 0;
@@ -385,6 +393,8 @@
   <button class="stop" id="stopBtn" type="button">Stop <kbd>SPACE</kbd></button>
 </header>
 
+<div class="reserve-banner" id="reserveBanner" role="status" hidden></div>
+
 <main>
   <section style="display:flex;flex-direction:column;min-height:0;">
     <div class="screen" id="screen">
@@ -554,7 +564,8 @@
                     "video","veil","veilWhy","prox","proxCm","gaugeFill","avg","batt","battBar",
                     "battCard","range","rangeBar","rangeCard","pan","tilt","recentre","speed",
                     "speedVal","maxDuty","helpBtn","help","helpClose","keys","vx","vy","om",
-                    "tag","vyWrap","videoBtn","camoff","pad","padStop","padCentre","padBtn"]) els[id] = $(id);
+                    "tag","vyWrap","videoBtn","camoff","pad","padStop","padCentre","padBtn",
+                    "reserveBanner"]) els[id] = $(id);
 
   let cfg = { maxDuty: 1400, deadmanMs: 700, holonomic: true };
   let control = null, degraded = false, isController = true;
@@ -761,6 +772,42 @@
       avg > RTT_DEGRADED_MS ? "var(--accent)" : avg > 400 ? "#e0a02c" : "var(--secondary)";
   }
 
+  // ---- reservation banner ---------------------------------------------------
+  // The gateway's `/` index is the only thing that sees every kind of caller — an
+  // MCP agent's robot_reserve included, which the robot itself never hears about
+  // (it is gateway-only state). This is information only: it never disables
+  // controls, and a browser can still open the sockets while it shows — the
+  // gateway's own admission rules are what actually enforce anything.
+  const robotName = base.replace(/^\//, "");
+
+  function paintReservationBanner(reservation) {
+    if (!reservation || !reservation.reserved) {
+      els.reserveBanner.hidden = true;
+      return;
+    }
+    const seconds = Math.max(0, Math.round(reservation.expires_in));
+    const holder = reservation.holder || "";
+    els.reserveBanner.textContent = holder.startsWith("lease:")
+      ? `Someone else is driving this robot — free in ~${seconds}s`
+      : `An agent (${holder}) is controlling this robot — free in ~${seconds}s`;
+    els.reserveBanner.hidden = false;
+  }
+
+  async function pollReservation() {
+    if (!robotName) return;   // served directly by the robot: no gateway index to read
+    try {
+      const res = await fetch(new URL("/", location));
+      if (!res.ok) return;
+      const body = await res.json();
+      paintReservationBanner(body.robots?.[robotName]?.reservation);
+    } catch {
+      // A failed fetch says nothing about who holds the robot — leave the banner as is
+      // rather than guess.
+    }
+  }
+  pollReservation();
+  setInterval(pollReservation, 10000);
+
   // ---- sockets ------------------------------------------------------------
   let retry = 500;
 
@@ -813,9 +860,18 @@
     };
 
     ws.onclose = ev => {
+      control = null;
+      if (ev.code === 1008) {
+        // Refused by policy, not a broken link — same reasoning as the video
+        // socket below. Retrying would just reconnect into the same refusal
+        // once a second, so stop and show the gateway's own reason text
+        // rather than a generic "control socket closed".
+        setLink("down", "refused");
+        setDegraded(true, ev.reason || "not authorized");
+        return;
+      }
       setLink("down", "offline");
       setDegraded(true, ev.code === 1013 ? "robot offline" : "control socket closed");
-      control = null;
       setTimeout(connectControl, retry);
       retry = Math.min(retry * 2, 8000);        // back off, do not hammer the Pi
     };
