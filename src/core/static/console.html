@@ -118,6 +118,33 @@
     border-bottom: 1px solid var(--hairline);
   }
 
+  .lease-countdown {
+    font-size: 13px; color: var(--ink-secondary);
+    padding: 6px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-pill);
+  }
+
+  /* Paid teleop, PAYMENTS_ENABLED=1 only: no usable token yet. Covers the whole
+     console rather than just the screen — driving controls make no sense to show
+     when no socket is open at all. */
+  .paywall {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    background: rgb(44 44 42 / .55); padding: 20px;
+  }
+  .paywall-card {
+    background: var(--surface-white); border-radius: var(--radius-lg);
+    box-shadow: var(--shadow); padding: 28px 30px; max-width: 380px; width: 100%;
+    text-align: center;
+  }
+  .paywall-card h2 { font-family: var(--font-serif); font-weight: 400; font-size: 28px; margin: 0 0 12px; }
+  .paywall-reason { color: var(--accent); font-size: 13px; margin: 0 0 10px; }
+  .paywall-price { color: var(--ink-secondary); font-size: 15px; margin: 0 0 18px; }
+  .paywall-card a.stop { display: inline-flex; text-decoration: none; }
+  .paywall-card a.stop[aria-disabled="true"] {
+    background: var(--surface-muted); color: var(--ink-secondary); cursor: not-allowed;
+    pointer-events: none;
+  }
+
   /* ---------- layout ---------- */
   main {
     flex: 1; min-height: 0;
@@ -390,10 +417,20 @@
     <span class="rtt num"><b id="avg">———</b> ms avg</span>
   </div>
 
+  <span class="lease-countdown num" id="leaseCountdown" hidden></span>
   <button class="stop" id="stopBtn" type="button">Stop <kbd>SPACE</kbd></button>
 </header>
 
 <div class="reserve-banner" id="reserveBanner" role="status" hidden></div>
+
+<div class="paywall" id="paywall" role="dialog" aria-label="Pay to drive" hidden>
+  <div class="paywall-card">
+    <h2>Pay to drive</h2>
+    <p id="paywallReason" class="paywall-reason" hidden></p>
+    <p id="paywallPrice" class="paywall-price"></p>
+    <a id="paywallLink" class="stop" href="#">Pay to drive</a>
+  </div>
+</div>
 
 <main>
   <section style="display:flex;flex-direction:column;min-height:0;">
@@ -543,13 +580,16 @@
   // wherever the page itself came from, so nothing hardcodes a host.
   const base = location.pathname.replace(/\/+$/, "").replace(/\/ui$/, "");
   const wsRoot = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base;
+  // Empty when served directly by the robot at "/" — there is no gateway index to
+  // read in that case, so payments/paywall logic below never engages (see fetchIndex).
+  const robotName = base.replace(/^\//, "");
 
-  // A token in this page's own query string is forwarded to both sockets.
-  // Browsers cannot set headers on a WebSocket handshake, so ?token= is the
-  // only way in — which makes switching auth on a matter of sharing a
-  // different URL rather than editing this file.
-  const pageToken = new URLSearchParams(location.search).get("token");
-  const tokenQuery = pageToken ? "?token=" + encodeURIComponent(pageToken) : "";
+  // A token in this page's own query string is forwarded to both sockets, and takes
+  // precedence over any stored capability — this is the operator's own static token,
+  // unrelated to paid-teleop leases. Browsers cannot set headers on a WebSocket
+  // handshake, so ?token= is the only way in.
+  const staticToken = new URLSearchParams(location.search).get("token");
+  let tokenQuery = staticToken ? "?token=" + encodeURIComponent(staticToken) : "";
 
   const HEARTBEAT_MS = 150;     // re-arms the server deadman while a key is held
   const PING_MS = 1000;
@@ -565,7 +605,8 @@
                     "battCard","range","rangeBar","rangeCard","pan","tilt","recentre","speed",
                     "speedVal","maxDuty","helpBtn","help","helpClose","keys","vx","vy","om",
                     "tag","vyWrap","videoBtn","camoff","pad","padStop","padCentre","padBtn",
-                    "reserveBanner"]) els[id] = $(id);
+                    "reserveBanner","leaseCountdown","paywall","paywallReason","paywallPrice",
+                    "paywallLink"]) els[id] = $(id);
 
   let cfg = { maxDuty: 1400, deadmanMs: 700, holonomic: true };
   let control = null, degraded = false, isController = true;
@@ -772,16 +813,148 @@
       avg > RTT_DEGRADED_MS ? "var(--accent)" : avg > 400 ? "#e0a02c" : "var(--secondary)";
   }
 
-  // ---- reservation banner ---------------------------------------------------
+  // ---- paid teleop: token intake, paywall, lease countdown -----------------
+  // paid-teleop-execution.md §0.5/step 5.2. Applies only when the gateway's index
+  // reports payments.enabled — everything here is inert (and unreachable, since
+  // `payments` stays `{ enabled: false }`) on a gateway with PAYMENTS_ENABLED unset.
+  const STORAGE_KEY = robotName ? "yakrobot.capability." + robotName : null;
+
+  // The five reasons that mean this specific token will never work — the sixth,
+  // "robot is held by another session", is transient and handled separately below.
+  const PAYWALL_REASONS = new Set([
+    "payment required", "invalid lease", "lease is for another robot",
+    "lease is for another gateway", "lease expired",
+  ]);
+
+  let payments = { enabled: false };
+  let latestIndex = null;
+  let capability = null;   // { token, claims } | null — never verified client-side
+  let paywalled = false;
+  let refused = false;     // idempotent guard: both sockets can 1008 the same reason
+  let countdownTimer = null;
+
+  // Decode only — verification is the gateway's job (core/capability.py). Null on
+  // any malformed token or one already expired, so the caller can tell "no usable
+  // capability" from "a broken one" without repeating this parsing.
+  function decodeCapabilityToken(token) {
+    try {
+      const payload = token.split(".")[0];
+      let b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const claims = JSON.parse(new TextDecoder().decode(bytes));
+      if (typeof claims.lease !== "string" || typeof claims.exp !== "number") return null;
+      if (claims.exp * 1000 <= Date.now()) return null;
+      return claims;
+    } catch {
+      return null;
+    }
+  }
+
+  function loadStoredCapability() {
+    if (!STORAGE_KEY) return null;
+    const stored = sessionStorage.getItem(STORAGE_KEY);
+    if (!stored) return null;
+    const claims = decodeCapabilityToken(stored);
+    if (!claims) { sessionStorage.removeItem(STORAGE_KEY); return null; }
+    return { token: stored, claims };
+  }
+
+  // A capability handed off in the URL hash (from the payment page's redirect) wins
+  // over anything already stored, and the hash is scrubbed immediately — the token
+  // must never sit in browser history or survive a copied link. The static ?token=
+  // above always takes precedence over both.
+  if (!staticToken) {
+    const hashToken = new URLSearchParams(location.hash.replace(/^#/, "")).get("token");
+    if (hashToken) {
+      if (STORAGE_KEY) sessionStorage.setItem(STORAGE_KEY, hashToken);
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    capability = loadStoredCapability();
+    if (capability) tokenQuery = "?token=" + encodeURIComponent(capability.token);
+  }
+
+  function stopCountdown() {
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+  }
+
+  function startCountdown(exp) {
+    stopCountdown();
+    els.leaseCountdown.hidden = false;
+    function tick() {
+      const remaining = exp * 1000 - Date.now();
+      if (remaining <= 0) { onLeaseRefused("lease expired"); return; }
+      const total = Math.floor(remaining / 1000);
+      els.leaseCountdown.textContent =
+        String(Math.floor(total / 60)).padStart(2, "0") + ":" +
+        String(total % 60).padStart(2, "0");
+    }
+    tick();
+    countdownTimer = setInterval(tick, 1000);
+  }
+
+  function showPaywall(reason) {
+    paywalled = true;
+    stopCountdown();
+    els.leaseCountdown.hidden = true;
+    els.paywall.hidden = false;
+    els.paywallReason.hidden = !reason;
+    els.paywallReason.textContent = reason || "";
+    els.paywallPrice.textContent = payments.teleop
+      ? `${payments.teleop.price_usdc} USDC for ${payments.teleop.lease_minutes} min`
+      : "";
+
+    const online = latestIndex?.robots?.[robotName]?.online === true;
+    if (payments.url && online) {
+      const u = new URL(payments.url);
+      u.searchParams.set("gateway", location.host);
+      u.searchParams.set("robot", robotName);
+      els.paywallLink.href = u.href;
+      els.paywallLink.textContent = "Pay to drive";
+      els.paywallLink.removeAttribute("aria-disabled");
+    } else {
+      els.paywallLink.removeAttribute("href");
+      els.paywallLink.textContent = online ? "Payments unavailable" : "Robot is offline";
+      els.paywallLink.setAttribute("aria-disabled", "true");
+    }
+  }
+
+  function hidePaywall() {
+    paywalled = false;
+    els.paywall.hidden = true;
+  }
+
+  // Funnels both sockets' 1008 close into one place — both can fire for the same
+  // refusal (a capability reserves on both control and video), so this is idempotent.
+  function onLeaseRefused(reason) {
+    if (refused) return;
+    refused = true;
+    stopNow();
+    if (PAYWALL_REASONS.has(reason)) {
+      if (STORAGE_KEY) sessionStorage.removeItem(STORAGE_KEY);
+      capability = null;
+      tokenQuery = staticToken ? "?token=" + encodeURIComponent(staticToken) : "";
+      showPaywall(reason);
+    } else if (reason === "robot is held by another session") {
+      // Not a bad token — the same one will work once the other session releases.
+      // The existing reservation banner (painted by tick() below) already explains
+      // why, so this just waits and tries again.
+      setTimeout(() => { refused = false; connectControl(); connectVideo(); }, 5000);
+    }
+    // Any other 1008 reason (e.g. "unauthorized", "no realtime socket for this
+    // robot") is not ours to retry — the socket's own onclose already showed it.
+  }
+
   // The gateway's `/` index is the only thing that sees every kind of caller — an
   // MCP agent's robot_reserve included, which the robot itself never hears about
-  // (it is gateway-only state). This is information only: it never disables
-  // controls, and a browser can still open the sockets while it shows — the
-  // gateway's own admission rules are what actually enforce anything.
-  const robotName = base.replace(/^\//, "");
-
+  // (it is gateway-only state). The banner is information only: it never disables
+  // controls, and never shows for a reservation this page's own lease holds.
   function paintReservationBanner(reservation) {
     if (!reservation || !reservation.reserved) {
+      els.reserveBanner.hidden = true;
+      return;
+    }
+    if (capability && reservation.holder === "lease:" + capability.claims.lease) {
       els.reserveBanner.hidden = true;
       return;
     }
@@ -793,20 +966,57 @@
     els.reserveBanner.hidden = false;
   }
 
-  async function pollReservation() {
-    if (!robotName) return;   // served directly by the robot: no gateway index to read
+  async function fetchIndex() {
+    if (!robotName) return null;   // served directly by the robot: no gateway index
     try {
       const res = await fetch(new URL("/", location));
-      if (!res.ok) return;
-      const body = await res.json();
-      paintReservationBanner(body.robots?.[robotName]?.reservation);
+      if (!res.ok) return null;
+      return await res.json();
     } catch {
-      // A failed fetch says nothing about who holds the robot — leave the banner as is
-      // rather than guess.
+      // A failed fetch says nothing about who holds the robot, or whether payments
+      // are even on — leave everything as it was rather than guess (see bootstrap).
+      return null;
     }
   }
-  pollReservation();
-  setInterval(pollReservation, 10000);
+
+  function tick() {
+    fetchIndex().then(index => {
+      if (!index) return;
+      latestIndex = index;
+      if (index.payments) payments = index.payments;
+      paintReservationBanner(index.robots?.[robotName]?.reservation);
+      if (paywalled) showPaywall(els.paywallReason.hidden ? null : els.paywallReason.textContent);
+    });
+  }
+
+  async function bootstrap() {
+    const index = await fetchIndex();
+    latestIndex = index;
+    if (index) {
+      if (index.payments) payments = index.payments;
+      paintReservationBanner(index.robots?.[robotName]?.reservation);
+    }
+
+    // Paywall only when the index actually confirmed payments are on and there is
+    // no usable token. A failed fetch falls through to opening sockets with
+    // whatever token is on hand — today's behaviour — rather than guessing at a
+    // dead screen; if payments really are on, the server's own 1008 "payment
+    // required" reaches the same paywall via onLeaseRefused.
+    if (index && payments.enabled && !staticToken && !capability) {
+      showPaywall(null);
+    } else {
+      hidePaywall();
+      if (capability) startCountdown(capability.claims.exp);
+      connectControl();
+      connectVideo();
+    }
+
+    setInterval(tick, 10000);
+  }
+
+  els.paywallLink.addEventListener("click", e => {
+    if (els.paywallLink.getAttribute("aria-disabled") === "true") e.preventDefault();
+  });
 
   // ---- sockets ------------------------------------------------------------
   let retry = 500;
@@ -868,8 +1078,12 @@
         // rather than a generic "control socket closed".
         setLink("down", "refused");
         setDegraded(true, ev.reason || "not authorized");
+        if (PAYWALL_REASONS.has(ev.reason) || ev.reason === "robot is held by another session") {
+          onLeaseRefused(ev.reason);
+        }
         return;
       }
+      if (paywalled) return;   // don't reopen with a token onLeaseRefused just cleared
       setLink("down", "offline");
       setDegraded(true, ev.code === 1013 ? "robot offline" : "control socket closed");
       setTimeout(connectControl, retry);
@@ -920,15 +1134,26 @@
       els.video.hidden = true;
       els.placeholder.hidden = false;
       if (ev.code === 1008) {
+        if (ev.reason === "robot is held by another session") {
+          // Leave videoOn true — onLeaseRefused's own 5s retry calls connectVideo()
+          // again; setting it false here would make that retry a silent no-op.
+          onLeaseRefused(ev.reason);
+          return;
+        }
         // Refused by policy, not a broken link. Retrying would just reconnect
-        // into the same refusal once a second, so stop and say why.
+        // into the same refusal once a second, so stop and say why. Covers both
+        // the five paywall reasons (onLeaseRefused clears the token and shows
+        // the paywall below) and other policy refusals (e.g. "video disabled on
+        // the gateway") that have nothing to do with payments.
         videoOn = false;
         els.videoBtn.textContent = "Turn camera on";
         els.camoff.classList.add("on");
         els.screen.classList.add("off");
         els.placeholder.hidden = true;
+        if (PAYWALL_REASONS.has(ev.reason)) onLeaseRefused(ev.reason);
         return;
       }
+      if (paywalled) return;   // don't reopen with a token onLeaseRefused just cleared
       // 1013 (try again later) means the gateway reached for the robot and
       // found it off. Keep retrying — it should reconnect on its own when the
       // car comes back — but back off like the control socket does, or a car
@@ -1001,8 +1226,7 @@
   els.helpBtn.addEventListener("click", () => els.help.showModal());
   els.helpClose.addEventListener("click", () => els.help.close());
 
-  connectControl();
-  connectVideo();
+  bootstrap();
 })();
 </script>
 </body>
