@@ -207,7 +207,9 @@ Serving:
   `yakrobot-payments` service selling leases for this gateway), `PAYMENTS_ISSUER` (its
   signing key's address — capabilities are verified by recovering the signer, never by
   calling out to the service), `TELEOP_PRICE_USDC` (default `1.00`), `TELEOP_LEASE_MINUTES`
-  (default `5`). Validated at startup and reported on the `/` index
+  (default `5`). The only call the gateway makes *to* the service is a best-effort
+  `POST {PAYMENTS_URL}/v1/release` when a driver releases a lease early — never on the
+  admission path. Validated at startup and reported on the `/` index
   (`core.payments_config`). Full rules: `plans/paid-teleop-execution.md` §0.1 in the
   `pi-drg` planning repo.
 

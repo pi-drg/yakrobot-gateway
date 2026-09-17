@@ -123,6 +123,17 @@
     padding: 6px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-pill);
   }
 
+  /* Deliberately quiet next to .stop — giving up the robot early is a courtesy to the
+     next buyer, not the urgent action on this screen, and never refunds anything. */
+  .release {
+    font-family: var(--font-sans); font-size: 13px; font-weight: 500;
+    color: var(--ink-secondary); background: transparent;
+    border: 1px solid var(--hairline); border-radius: var(--radius-pill);
+    padding: 6px 14px; cursor: pointer;
+  }
+  .release:hover { background: var(--surface-muted); }
+  .release:disabled { opacity: .5; cursor: default; }
+
   /* Paid teleop, PAYMENTS_ENABLED=1 only: no usable token yet. Covers the whole
      console rather than just the screen — driving controls make no sense to show
      when no socket is open at all. */
@@ -131,6 +142,10 @@
     display: flex; align-items: center; justify-content: center;
     background: rgb(44 44 42 / .55); padding: 20px;
   }
+  /* `display: flex` above is an author rule, which beats the browser's default
+     `[hidden] { display: none }` regardless of specificity — without this, toggling
+     the `hidden` attribute in JS has no visible effect and the overlay never closes. */
+  .paywall[hidden] { display: none; }
   .paywall-card {
     background: var(--surface-white); border-radius: var(--radius-lg);
     box-shadow: var(--shadow); padding: 28px 30px; max-width: 380px; width: 100%;
@@ -320,6 +335,12 @@
   .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
   .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
 
+  .tx-link {
+    font-size: 13px; color: var(--ink-secondary); text-decoration: underline;
+    text-underline-offset: 3px; white-space: nowrap;
+  }
+  .tx-link[hidden] { display: none; }
+
   .pad button {
     -webkit-tap-highlight-color: transparent;
     width: 58px; height: 52px;          /* comfortably over the 44px minimum */
@@ -418,6 +439,8 @@
   </div>
 
   <span class="lease-countdown num" id="leaseCountdown" hidden></span>
+  <a class="tx-link" id="txLink" hidden><span id="txLinkAnchor"></span></a>
+  <button class="release" id="releaseBtn" type="button" hidden>Release lease</button>
   <button class="stop" id="stopBtn" type="button">Stop <kbd>SPACE</kbd></button>
 </header>
 
@@ -606,7 +629,7 @@
                     "speedVal","maxDuty","helpBtn","help","helpClose","keys","vx","vy","om",
                     "tag","vyWrap","videoBtn","camoff","pad","padStop","padCentre","padBtn",
                     "reserveBanner","leaseCountdown","paywall","paywallReason","paywallPrice",
-                    "paywallLink"]) els[id] = $(id);
+                    "paywallLink","txLink","txLinkAnchor","releaseBtn"]) els[id] = $(id);
 
   let cfg = { maxDuty: 1400, deadmanMs: 700, holonomic: true };
   let control = null, degraded = false, isController = true;
@@ -819,11 +842,17 @@
   // `payments` stays `{ enabled: false }`) on a gateway with PAYMENTS_ENABLED unset.
   const STORAGE_KEY = robotName ? "yakrobot.capability." + robotName : null;
 
-  // The five reasons that mean this specific token will never work — the sixth,
-  // "robot is held by another session", is transient and handled separately below.
+  // Paid-teleop decisions, logged so a stuck paywall can be diagnosed from DevTools
+  // (with "Preserve log" on, the trail survives the payment redirect and reloads).
+  function teleopLog(...args) { console.info("[paid-teleop]", ...args); }
+
+  // The six reasons that mean this specific token will never work again — the
+  // seventh, "robot is held by another session", is transient and handled separately
+  // below. "lease released" is this session's own voluntary early release (see the
+  // Release button below), not a refusal from someone else.
   const PAYWALL_REASONS = new Set([
     "payment required", "invalid lease", "lease is for another robot",
-    "lease is for another gateway", "lease expired",
+    "lease is for another gateway", "lease expired", "lease released",
   ]);
 
   let payments = { enabled: false };
@@ -860,27 +889,68 @@
     return { token: stored, claims };
   }
 
+  // Settlement always happens on a testnet-or-mainnet pair the payment page already
+  // knows (client/pay.ts's own CHAINS) — only the two this platform ever sells against.
+  const BLOCK_EXPLORERS = { 84532: "https://sepolia.basescan.org", 8453: "https://basescan.org" };
+  const TX_STORAGE_KEY = robotName ? "yakrobot.tx." + robotName : null;
+
+  function renderTxLink(tx, chainId) {
+    const base = BLOCK_EXPLORERS[chainId];
+    if (!tx || !base) { els.txLink.hidden = true; return; }
+    els.txLink.href = `${base}/tx/${tx}`;
+    els.txLink.target = "_blank";
+    els.txLink.rel = "noopener";
+    els.txLink.title = tx;
+    els.txLinkAnchor.textContent = `Payment ${tx.slice(0, 6)}…${tx.slice(-4)} ↗`;
+    els.txLink.hidden = false;
+  }
+
   // A capability handed off in the URL hash (from the payment page's redirect) wins
   // over anything already stored, and the hash is scrubbed immediately — the token
   // must never sit in browser history or survive a copied link. The static ?token=
   // above always takes precedence over both.
   if (!staticToken) {
-    const hashToken = new URLSearchParams(location.hash.replace(/^#/, "")).get("token");
+    const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const hashToken = hashParams.get("token");
     if (hashToken) {
       if (STORAGE_KEY) sessionStorage.setItem(STORAGE_KEY, hashToken);
-      history.replaceState(null, "", location.pathname + location.search);
+      const tx = hashParams.get("tx"), chainId = Number(hashParams.get("chain"));
+      if (tx && TX_STORAGE_KEY) sessionStorage.setItem(TX_STORAGE_KEY, JSON.stringify({ tx, chainId }));
+      // `?lease=` only exists to make the payment redirect URL uncacheable; drop it too.
+      const search = new URLSearchParams(location.search);
+      search.delete("lease");
+      const query = search.toString();
+      history.replaceState(null, "", location.pathname + (query ? "?" + query : ""));
     }
     capability = loadStoredCapability();
     if (capability) tokenQuery = "?token=" + encodeURIComponent(capability.token);
+    teleopLog("page load", {
+      navType: performance.getEntriesByType("navigation")[0]?.type,
+      tokenInUrl: !!hashToken,
+      txInUrl: hashParams.get("tx"),
+      txStored: TX_STORAGE_KEY ? sessionStorage.getItem(TX_STORAGE_KEY) : null,
+      capability: capability ? { lease: capability.claims.lease, secsLeft: capability.claims.exp - Math.floor(Date.now() / 1000) } : null,
+    });
+
+    if (TX_STORAGE_KEY) {
+      try {
+        const stored = JSON.parse(sessionStorage.getItem(TX_STORAGE_KEY) || "null");
+        if (stored) renderTxLink(stored.tx, stored.chainId);
+      } catch {
+        sessionStorage.removeItem(TX_STORAGE_KEY);
+      }
+    }
   }
 
   function stopCountdown() {
     if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    els.releaseBtn.hidden = true;
   }
 
   function startCountdown(exp) {
     stopCountdown();
     els.leaseCountdown.hidden = false;
+    els.releaseBtn.hidden = false;
     function tick() {
       const remaining = exp * 1000 - Date.now();
       if (remaining <= 0) { onLeaseRefused("lease expired"); return; }
@@ -894,6 +964,7 @@
   }
 
   function showPaywall(reason) {
+    if (!paywalled) teleopLog("paywall shown", { reason, from: new Error().stack.split("\n").slice(2, 4).join(" | ") });
     paywalled = true;
     stopCountdown();
     els.leaseCountdown.hidden = true;
@@ -1002,6 +1073,7 @@
     // whatever token is on hand — today's behaviour — rather than guessing at a
     // dead screen; if payments really are on, the server's own 1008 "payment
     // required" reaches the same paywall via onLeaseRefused.
+    teleopLog("bootstrap", { indexLoaded: !!index, paymentsEnabled: payments.enabled, staticToken: !!staticToken, hasCapability: !!capability });
     if (index && payments.enabled && !staticToken && !capability) {
       showPaywall(null);
     } else {
@@ -1016,6 +1088,37 @@
 
   els.paywallLink.addEventListener("click", e => {
     if (els.paywallLink.getAttribute("aria-disabled") === "true") e.preventDefault();
+  });
+
+  // Never refunds — only frees the robot early for the next buyer (see
+  // /{robot}/lease/release in core/ws_proxy.py, which also tells the payments service).
+  // The server force-closes this session's sockets, whose onclose handlers run the same
+  // onLeaseRefused cleanup; calling it here too covers a lease with no socket open.
+  els.releaseBtn.addEventListener("click", async () => {
+    if (!capability) return;
+    els.releaseBtn.disabled = true;
+    els.releaseBtn.textContent = "Releasing…";
+    let result = null;
+    try {
+      const res = await fetch(base + "/lease/release", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: capability.token }),
+      });
+      if (res.ok) result = await res.json();
+    } catch {
+      // Network failure: the lease simply runs out at its normal exp instead.
+    }
+    els.releaseBtn.disabled = false;
+    els.releaseBtn.textContent = "Release lease";
+    if (!result) return;
+    onLeaseRefused("lease released");
+    if (result.ledger_released === false) {
+      els.paywallReason.hidden = false;
+      els.paywallReason.textContent =
+        "lease released — the payments service wasn't reachable, so a new purchase " +
+        "may have to wait until the original lease time runs out";
+    }
   });
 
   // ---- sockets ------------------------------------------------------------
@@ -1070,6 +1173,7 @@
     };
 
     ws.onclose = ev => {
+      teleopLog("socket closed", { url: ws.url.split("?")[0], code: ev.code, reason: ev.reason });
       control = null;
       if (ev.code === 1008) {
         // Refused by policy, not a broken link — same reasoning as the video
@@ -1130,6 +1234,7 @@
       url = next;
     };
     ws.onclose = ev => {
+      teleopLog("socket closed", { url: ws.url.split("?")[0], code: ev.code, reason: ev.reason });
       if (!videoOn) return;            // deliberate: do not fight the operator
       els.video.hidden = true;
       els.placeholder.hidden = false;

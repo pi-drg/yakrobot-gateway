@@ -704,3 +704,171 @@ def test_capability_admits_both_sockets():
                     assert isinstance(frame, bytes) and frame[:2] == b"\xff\xd8"
 
     asyncio.run(run())
+
+
+# ---- POST /{robot}/lease/release --------------------------------------------------
+
+
+def test_release_frees_the_reservation_and_closes_the_socket():
+    """The golden path: releasing force-closes this session's own live socket (so the
+    paywall the console shows and the car's actual drivability agree) and frees the
+    reservation immediately, rather than making the next buyer wait out the unused
+    remainder of someone else's paid minutes."""
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            claims = _capability_claims()
+            token = mint(claims, pk.to_hex())
+            async with httpx.AsyncClient() as client:
+                async with connect(f"{stack.control}?token={token}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+
+                    r = await client.post(
+                        f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                        json={"token": token},
+                    )
+                    assert r.status_code == 200
+                    # PAYMENTS_URL here points at a closed port: the gateway side still
+                    # releases, and says the ledger could not be told.
+                    assert r.json() == {"released": True, "ledger_released": False}
+
+                    with pytest.raises(Exception):
+                        await asyncio.wait_for(ws.recv(), timeout=5)
+                    assert (ws.close_code, ws.close_reason) == (1008, "lease released")
+
+                r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                assert r.json()["robots"]["fakerobot_picar"]["reservation"]["reserved"] is False
+
+            # The robot is free immediately — a second, different lease does not have
+            # to wait out the first one's unused remaining minutes.
+            other_claims = _capability_claims(lease="99999999-9999-4999-8999-999999999999")
+            other_token = mint(other_claims, pk.to_hex())
+            async with connect(f"{stack.control}?token={other_token}") as ws2:
+                assert (await _recv_json(ws2))["type"] == "hello"
+
+    asyncio.run(run())
+
+
+def test_released_token_cannot_reconnect():
+    """The token stays cryptographically valid until exp — without this refusal its holder
+    could release, let someone else buy, and then take the robot back."""
+    async def run():
+        import httpx
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)) as stack:
+            token = mint(_capability_claims(), pk.to_hex())
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                    json={"token": token},
+                )
+                assert r.status_code == 200
+            assert await _refusal(f"{stack.control}?token={token}") == (1008, "lease released")
+
+    asyncio.run(run())
+
+
+def test_release_is_forwarded_to_the_payments_service():
+    async def run():
+        import httpx
+        from fastapi import FastAPI, Request
+
+        received: list[dict] = []
+        payments_app = FastAPI()
+
+        @payments_app.post("/v1/release")
+        async def fake_release(request: Request):
+            received.append(await request.json())
+            return {"released": True}
+
+        payments_port = GW_PORT + 10
+        payments_server = await _serve(payments_app, payments_port)
+        try:
+            pk, issuer = _new_issuer()
+            env = _payments_env(issuer, PAYMENTS_URL=f"http://127.0.0.1:{payments_port}")
+            async with _Stack(env=env):
+                token = mint(_capability_claims(), pk.to_hex())
+                async with httpx.AsyncClient() as client:
+                    r = await client.post(
+                        f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                        json={"token": token},
+                    )
+                assert r.json() == {"released": True, "ledger_released": True}
+                assert received == [{"token": token}]
+        finally:
+            server, task = payments_server
+            server.should_exit = True
+            await task
+
+    asyncio.run(run())
+
+
+def test_release_for_other_robot_refused():
+    async def run():
+        import httpx
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)):
+            token = mint(_capability_claims(robot="some_other_robot"), pk.to_hex())
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                    json={"token": token},
+                )
+                assert r.status_code == 400
+                assert r.json()["detail"] == "lease is for another robot"
+
+    asyncio.run(run())
+
+
+def test_release_expired_lease_refused():
+    async def run():
+        import httpx
+
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)):
+            now = int(time.time())
+            token = mint(_capability_claims(iat=now - 400, exp=now - 100), pk.to_hex())
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                    json={"token": token},
+                )
+                assert r.status_code == 400
+                assert r.json()["detail"] == "lease expired"
+
+    asyncio.run(run())
+
+
+def test_release_missing_token_refused():
+    async def run():
+        pk, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)):
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release", json={}
+                )
+                assert r.status_code == 400
+
+    asyncio.run(run())
+
+
+def test_release_refused_when_payments_disabled():
+    async def run():
+        import httpx
+
+        async with _Stack():
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                    json={"token": "irrelevant"},
+                )
+                assert r.status_code == 404
+
+    asyncio.run(run())

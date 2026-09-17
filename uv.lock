@@ -1692,6 +1692,7 @@ fakerobot-picar = [
 payments = [
     { name = "eth-hash", extra = ["pycryptodome"] },
     { name = "eth-keys" },
+    { name = "httpx" },
 ]
 picar-freenove = [
     { name = "httpx" },
@@ -1719,6 +1720,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'fakerobot'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'fakerobot-picar'", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'payments'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'picar-freenove'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'tumbller'", specifier = ">=0.28.1" },
     { name = "numpy", marker = "extra == 'all'", specifier = ">=2.0" },

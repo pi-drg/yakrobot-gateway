@@ -53,10 +53,11 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 import websockets
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocket
 
-from core.capability import CapabilityError, normalize_host, verify
+from core.capability import CapabilityError, Claims, normalize_host, verify
 from core.descriptor_route import _public_domain
 from core.plugin import RobotPlugin
 
@@ -234,10 +235,16 @@ async def _pump_to_robot(ws: WebSocket, robot) -> None:
 async def _pump_to_browser(ws: WebSocket, robot) -> None:
     """robot -> browser. Video frames arrive binary, telemetry as text."""
     async for message in robot:
-        if isinstance(message, str):
-            await ws.send_text(message)
-        else:
-            await ws.send_bytes(message)
+        try:
+            if isinstance(message, str):
+                await ws.send_text(message)
+            else:
+                await ws.send_bytes(message)
+        except (RuntimeError, OSError):
+            # The browser socket was closed underneath this relay — by a lease release or
+            # expiry closing it from another task, or the peer vanishing mid-frame. The
+            # session is over either way; a routine teardown, not a traceback.
+            return
 
 
 async def _close_at_expiry(ws: WebSocket, exp: int) -> None:
@@ -265,6 +272,47 @@ async def _renew_reservation(registry, robot: str, client_id: str) -> None:
     while True:
         await asyncio.sleep(RESERVATION_RENEW_S)
         registry.reserve(robot, client_id)
+
+
+LEDGER_RELEASE_TIMEOUT_S = 5.0
+
+
+async def _release_ledger(payments_url: str, token: str) -> bool:
+    """Tell the payments service the lease ended early, so its ledger stops refusing the
+    next sale until the original exp.
+
+    The one outbound call this gateway makes to the payments service, and deliberately
+    off the admission path (paid-teleop-access.md §4.1 rules out a gateway that depends
+    on the service to let a driver in). Best-effort: the robot is already free here
+    whatever happens, and the service verifies the token's signature itself rather than
+    trusting this gateway. False on any failure.
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=LEDGER_RELEASE_TIMEOUT_S) as client:
+            r = await client.post(f"{payments_url}/v1/release", json={"token": token})
+        return r.status_code == 200 and r.json().get("released") is True
+    except Exception:
+        logger.warning("ws proxy: could not release the lease with the payments service")
+        return False
+
+
+def _verify_lease(token: str, robot: str, conn: HTTPConnection, payments, now: int) -> Claims:
+    """Verify a capability names ``robot`` and this gateway, and is not expired —
+    the socket-admission checks of paid-teleop-execution.md §0.5, factored out so the
+    lease-release endpoint below enforces exactly the same rules rather than a second,
+    driftable copy of them. Raises ``CapabilityError`` with the exact §0.5 reason
+    string on any failure.
+    """
+    claims = verify(token, payments.issuer, lease_minutes=payments.lease_minutes, now=now)
+    if claims.robot != robot:
+        raise CapabilityError("lease is for another robot")
+    if normalize_host(claims.gateway) != normalize_host(_public_domain(conn)):
+        raise CapabilityError("lease is for another gateway")
+    if claims.exp <= now:
+        raise CapabilityError("lease expired")
+    return claims
 
 
 def register_ws_proxy(
@@ -300,6 +348,19 @@ def register_ws_proxy(
     offline_until: dict[str, float] = {}
     offline_logged: set[str] = set()
 
+    # Every currently-open capability-admitted socket, keyed by (robot, lease id) —
+    # populated on accept(), emptied on teardown. This is what lets the release
+    # endpoint below actually disconnect a live session instead of only freeing the
+    # reservation for the *next* connect attempt while this one drives on unaware.
+    lease_sockets: dict[tuple[str, str], list[WebSocket]] = {}
+
+    # Lease id -> its exp, for leases given up early. The token itself stays
+    # cryptographically valid until exp, so without this the same holder could reconnect
+    # and take the robot back from whoever buys next. In memory only: a gateway restart
+    # forgets it, which reopens that window for at most the released lease's remaining
+    # minutes.
+    released_leases: dict[str, int] = {}
+
     @app.websocket("/{robot}/ws/{path:path}")
     async def robot_ws_proxy(ws: WebSocket, robot: str, path: str):
         entry = proxied.get(robot)
@@ -325,6 +386,7 @@ def register_ws_proxy(
         expiry_at: int | None = None
         renew_client_id: str | None = None
         release_client_id: str | None = None
+        lease_key: tuple[str, str] | None = None
 
         if payments.enabled:
             # paid-teleop-execution.md §0.5, in order. Every branch below either admits
@@ -349,26 +411,14 @@ def register_ws_proxy(
                     renew_client_id = client_id
                     release_client_id = client_id
             else:
+                now = int(time.time())
                 try:
-                    claims = verify(
-                        supplied,
-                        payments.issuer,
-                        lease_minutes=payments.lease_minutes,
-                        now=int(time.time()),
-                    )
+                    claims = _verify_lease(supplied, robot, ws, payments, now)
                 except CapabilityError as exc:
                     await _refuse(ws, 1008, str(exc))
                     return
-
-                if claims.robot != robot:
-                    await _refuse(ws, 1008, "lease is for another robot")
-                    return
-                if normalize_host(claims.gateway) != normalize_host(_public_domain(ws)):
-                    await _refuse(ws, 1008, "lease is for another gateway")
-                    return
-                now = int(time.time())
-                if claims.exp <= now:
-                    await _refuse(ws, 1008, "lease expired")
+                if released_leases.get(claims.lease, 0) > now:
+                    await _refuse(ws, 1008, "lease released")
                     return
                 # Two checks, not one: `now + leeway` decided verify()'s "iat/duration
                 # valid"; a zero-or-negative ttl here would hand the registry a lease it
@@ -377,6 +427,7 @@ def register_ws_proxy(
                     await _refuse(ws, 1008, "robot is held by another session")
                     return
                 expiry_at = claims.exp
+                lease_key = (robot, claims.lease)
 
             gateway_auth = True
         else:
@@ -441,6 +492,8 @@ def register_ws_proxy(
             extra_tasks.append(
                 asyncio.create_task(_renew_reservation(registry, robot, renew_client_id))
             )
+        if lease_key is not None:
+            lease_sockets.setdefault(lease_key, []).append(ws)
 
         async with robot_ws:
             tasks = [
@@ -472,4 +525,54 @@ def register_ws_proxy(
                 # socket.
                 if release_client_id is not None:
                     registry.release(robot, release_client_id)
+                if lease_key is not None:
+                    sockets = lease_sockets.get(lease_key)
+                    if sockets and ws in sockets:
+                        sockets.remove(ws)
+                        if not sockets:
+                            lease_sockets.pop(lease_key, None)
         logger.info("ws proxy: %s/ws/%s closed", robot, path)
+
+    @app.post("/{robot}/lease/release")
+    async def release_lease(request: Request, robot: str) -> dict:
+        """Voluntarily give up a paid-teleop lease before it expires.
+
+        Never refunds — settlement is a direct wallet-to-owner transfer with no escrow
+        (paid-teleop-access.md §4.2), so there is no key anywhere that could claw money
+        back. This only frees the *robot* early: the reservation is released so the next
+        buyer does not wait out someone else's unused minutes, and this session's own
+        live sockets (if any) are force-closed so the page's "released" state and the
+        car's actual drivability agree, instead of a stale socket quietly outliving the
+        paywall the console shows after this call.
+        """
+        if robot not in proxied:
+            raise HTTPException(status_code=404, detail=f"no realtime socket for {robot!r}")
+        if not payments.enabled:
+            raise HTTPException(status_code=404, detail="paid teleop is not enabled on this gateway")
+
+        body = await request.json()
+        token = body.get("token") if isinstance(body, dict) else None
+        if not token:
+            raise HTTPException(status_code=400, detail="token is required")
+
+        try:
+            claims = _verify_lease(token, robot, request, payments, int(time.time()))
+        except CapabilityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        now = int(time.time())
+        for lease_id, exp in list(released_leases.items()):
+            if exp <= now:
+                del released_leases[lease_id]
+        released_leases[claims.lease] = claims.exp
+        registry.release(robot, f"lease:{claims.lease}")
+
+        for sock in list(lease_sockets.get((robot, claims.lease), [])):
+            try:
+                await sock.close(code=1008, reason="lease released")
+            except Exception:
+                # Same reasoning as every other best-effort close in this module: the
+                # peer may already be gone.
+                pass
+
+        return {"released": True, "ledger_released": await _release_ledger(payments.url, token)}
