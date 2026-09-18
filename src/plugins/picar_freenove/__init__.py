@@ -21,7 +21,7 @@ from core.plugin import RobotPlugin, RobotMetadata
 class PicarFreenovePlugin(RobotPlugin):
     def metadata(self) -> RobotMetadata:
         return RobotMetadata(
-            name="PiCar-Freenove",
+            name="PiCar-Finland-01",
             description=(
                 "A Freenove 4WD Smart Car on a Raspberry Pi: drive and strafe, "
                 "pan/tilt camera with snapshots, ultrasonic distance and sweep, "

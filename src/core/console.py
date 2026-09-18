@@ -52,4 +52,10 @@ def register_console(app: FastAPI, plugins: dict[str, RobotPlugin]) -> None:
         # page is inert markup, and every socket it opens is checked on
         # connect. Gating the HTML would only hide the page that explains the
         # operator needs a token.
-        return FileResponse(CONSOLE_HTML, media_type="text/html")
+        # no-cache = always revalidate, not "never store": the ETag FileResponse sets
+        # still makes an unchanged page a tiny 304. Without it a browser applies
+        # heuristic freshness from Last-Modified and can keep serving a stale console
+        # for hours after a gateway upgrade — including on the payment redirect back.
+        return FileResponse(
+            CONSOLE_HTML, media_type="text/html", headers={"Cache-Control": "no-cache"}
+        )

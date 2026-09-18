@@ -1,6 +1,7 @@
+import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Response
@@ -177,9 +178,30 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     StreamableHTTPSessionManager task group. We compose all lifespans
     into the gateway's lifespan.
     """
+    from core.payments_config import (
+        PaymentsConfigError,
+        index_summary,
+        load_free_teleop_config,
+        load_payments_config,
+        teleop_summary,
+    )
+    from core.reachability import Reachability, probe_forever
     from core.reservation import ReservationRegistry
 
+    # Validated first, so a bad config fails before anything is served —
+    # paid-teleop-execution.md §0.1/step 0.3.
+    payments_cfg = load_payments_config()
+    if payments_cfg.enabled:
+        try:
+            import eth_keys  # noqa: F401
+        except ImportError:
+            raise PaymentsConfigError(
+                "PAYMENTS_ENABLED=1 needs: uv sync --extra payments"
+            ) from None
+    free_teleop_cfg = load_free_teleop_config(payments_cfg)
+
     registry = ReservationRegistry()  # shared across every robot server + the index
+    reachability = Reachability()  # shared between the proxy's real connects and the probe
 
     mcp_apps = {}
     mounted_robots: dict[str, str] = {}
@@ -196,9 +218,19 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     async def lifespan(app):
         # Start all MCP app lifespans (initializes their task groups)
         async with _compose_lifespans(mcp_apps.values()):
-            yield
+            probe_task = asyncio.create_task(probe_forever(plugins, reachability))
+            try:
+                yield
+            finally:
+                probe_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await probe_task
 
     app = FastAPI(title="Robot Fleet Gateway", lifespan=lifespan)
+    app.state.registry = registry
+    app.state.payments = payments_cfg
+    app.state.free_teleop = free_teleop_cfg
+    app.state.reachability = reachability
 
     # Everything the gateway serves under a robot's own prefix: the realtime socket
     # proxy to its control server, the driving console, and its descriptor JSON. All
@@ -209,7 +241,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     from core.descriptor_route import CORS_HEADERS, register_descriptor_route
     from core.ws_proxy import register_ws_proxy
 
-    register_ws_proxy(app, plugins)
+    register_ws_proxy(app, plugins, registry, reachability, payments_cfg, free_teleop_cfg)
     register_console(app, plugins)
     register_descriptor_route(app, plugins)
 
@@ -230,6 +262,8 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
         return JSONResponse(
             {
                 "service": "Robot Fleet Gateway",
+                "payments": index_summary(payments_cfg),
+                "teleop": teleop_summary(payments_cfg, free_teleop_cfg),
                 "robots": {
                     name: {
                         "mcp_endpoint": f"/{name}/mcp",
@@ -240,6 +274,11 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                         **({"ui_endpoint": f"/{name}/ui"} if plugin.control_base_urls() else {}),
                         "tools": plugin.tool_names(),
                         "reservation": registry.status(name),
+                        # True/False once observed; null for a robot with no control
+                        # server at all (never probed, and never will be).
+                        "online": (
+                            reachability.get(name) if plugin.control_base_urls() else None
+                        ),
                     }
                     for name, plugin in plugins.items()
                 },

@@ -74,6 +74,11 @@ def serve_gateway(robots=None, port=8000, tunnel=None):
         print(f"  {public_url}/fleet/mcp")
         for name in plugins:
             print(f"  {public_url}/{name}/mcp")
+        drivable = [name for name, plugin in plugins.items() if plugin.control_base_urls()]
+        if drivable:
+            print(f"\nteleop UI ({tunnel} tunnel): {public_url}")
+            for name in drivable:
+                print(f"  {public_url}/{name}/ui")
 
     try:
         uvicorn.run(app, host="0.0.0.0", port=port)
