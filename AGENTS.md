@@ -67,8 +67,11 @@ yakrobot-gateway/
   one agent rejects control calls from others (identity = per-agent token `client_id`).
 - Plugin auto-discovery scans `src/plugins/` for `RobotPlugin` subclasses.
 - **Teleop is not MCP.** The console speaks its own JSON protocol over a WebSocket the
-  gateway splices to the robot; it does not go through FastMCP or the reservation
-  registry. Its own single-driver rule and deadman timer live *on the robot*.
+  gateway splices to the robot; it never goes through FastMCP. It always reserves
+  through the same reservation registry MCP agents use (below) — a static agent token,
+  a paid lease, or a free reservation is required in every configuration; there is no
+  gateway state where a socket opens with no reservation at all. The robot's own
+  single-driver rule and deadman timer are the backstop either way.
 
 **Route order is load-bearing.** `register_ws_proxy`, `register_console` and
 `register_descriptor_route` must all run before `app.mount(f"/{name}", ...)` in
@@ -202,16 +205,26 @@ Serving:
   client, for a metered or congested link. Control keeps working: the car stays drivable,
   just blind. Absent means enabled.
 - Task auctions and Stripe payments live in `yakrobot-marketplace`, not here.
-- **Paid teleop** (optional — off by default): `PAYMENTS_ENABLED` (`0`/`1`; unset means
-  today's behaviour — no capability checks, no paywall), `PAYMENTS_URL` (the
-  `yakrobot-payments` service selling leases for this gateway), `PAYMENTS_ISSUER` (its
-  signing key's address — capabilities are verified by recovering the signer, never by
-  calling out to the service), `TELEOP_PRICE_USDC` (default `1.00`), `TELEOP_LEASE_MINUTES`
-  (default `5`). The only call the gateway makes *to* the service is a best-effort
-  `POST {PAYMENTS_URL}/v1/release` when a driver releases a lease early — never on the
-  admission path. Validated at startup and reported on the `/` index
-  (`core.payments_config`). Full rules: `plans/paid-teleop-execution.md` §0.1 in the
-  `pi-drg` planning repo.
+- **Teleop admission is always one of two modes — paid or free — never neither.**
+  `PAYMENTS_ENABLED` (`0`/`1`, default `0`) picks which: set it for paid teleop; leave
+  it unset/`0` and free reservations are automatically on instead. There is no separate
+  toggle for free mode and no combination of both.
+  - **Paid teleop** (`PAYMENTS_ENABLED=1`): `PAYMENTS_URL` (the `yakrobot-payments`
+    service selling leases for this gateway), `PAYMENTS_ISSUER` (its signing key's
+    address — capabilities are verified by recovering the signer, never by calling out
+    to the service), `TELEOP_PRICE_USDC` (default `1.00`), `TELEOP_LEASE_MINUTES`
+    (default `5`). The only call the gateway makes *to* the service is a best-effort
+    `POST {PAYMENTS_URL}/v1/release` when a driver releases a lease early — never on
+    the admission path.
+  - **Free teleop** (`PAYMENTS_ENABLED` unset/`0`): an unpaid, gateway-local "reserve"
+    click instead of a payment — `POST /{robot}/lease/reserve` grants exclusive control
+    for `TELEOP_LEASE_MINUTES` (shared with paid teleop, same default), and
+    `POST /{robot}/lease/release` frees it early. No signature, no external service —
+    the token is only meaningful to this gateway's own memory, so a restart forgets
+    every open reservation.
+
+  Both validated at startup and reported on the `/` index (`core.payments_config`).
+  Full rules: `plans/paid-teleop-execution.md` §0.1 in the `pi-drg` planning repo.
 
 There are **no chain secrets** in this repo or in `yakrobot-identity`: registration and
 attestation are signed by a browser wallet, and the identity package is read-only. If a
