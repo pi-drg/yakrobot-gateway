@@ -1,10 +1,17 @@
-"""Read and validate paid-teleop configuration from the environment.
+"""Read and validate paid-teleop and free-teleop configuration from the environment.
 
 Configured per gateway, by its operator, in ``.env`` — see AGENTS.md and
-paid-teleop-execution.md §0.1, the authoritative source for every name, default and
-validation rule here. Disabled (the default) is exactly today's behaviour: the other
-four variables are not read at all, so an operator can leave them unset or garbage while
-paid teleop is off.
+paid-teleop-execution.md §0.1, the authoritative source for every paid-teleop name,
+default and validation rule here. Disabled (the default) is exactly today's behaviour
+for `PAYMENTS_URL`/`PAYMENTS_ISSUER`/`TELEOP_PRICE_USDC` — none of those three are read
+at all while ``PAYMENTS_ENABLED`` is off. ``TELEOP_LEASE_MINUTES`` is the one exception:
+it is validated **regardless** of ``PAYMENTS_ENABLED``, because free reservations always
+need it — see below.
+
+Free reservations are the unpaid sibling: an explicit "reserve" click instead of a
+payment, same ``TELEOP_LEASE_MINUTES`` cap, no money or signature involved — and they
+are simply *whatever payments isn't*. There is no separate toggle and no "neither" state:
+every gateway runs one or the other. See ``load_free_teleop_config``.
 
 Read at call time (the ``video_enabled()`` pattern in ``core.ws_proxy``), never cached at
 import, so tests and a running gateway both see live env changes.
@@ -33,6 +40,12 @@ class PaymentsConfig:
     url: str | None = None
     issuer: str | None = None
     price_usdc: str | None = None
+    lease_minutes: int | None = None
+
+
+@dataclass(frozen=True)
+class FreeTeleopConfig:
+    enabled: bool
     lease_minutes: int | None = None
 
 
@@ -89,7 +102,13 @@ def _price_or_default() -> str:
     )
 
 
-def _lease_minutes_or_default() -> int:
+def load_lease_minutes() -> int:
+    """``TELEOP_LEASE_MINUTES``, validated, defaulted — shared by paid and free teleop.
+
+    Public (not ``_``-prefixed) because both modes read it independently of each other's
+    enabled state; ``load_payments_config`` and ``load_free_teleop_config`` each call
+    this rather than either owning it.
+    """
     raw = os.environ.get("TELEOP_LEASE_MINUTES")
     return _validate_lease_minutes(
         "TELEOP_LEASE_MINUTES", _DEFAULT_LEASE_MINUTES if raw is None else raw.strip()
@@ -109,7 +128,7 @@ def load_payments_config() -> PaymentsConfig:
     url = _validate_url("PAYMENTS_URL", _require("PAYMENTS_URL"))
     issuer = _validate_issuer("PAYMENTS_ISSUER", _require("PAYMENTS_ISSUER"))
     price_usdc = _price_or_default()
-    lease_minutes = _lease_minutes_or_default()
+    lease_minutes = load_lease_minutes()
 
     return PaymentsConfig(
         enabled=True,
@@ -118,6 +137,15 @@ def load_payments_config() -> PaymentsConfig:
         price_usdc=price_usdc,
         lease_minutes=lease_minutes,
     )
+
+
+def load_free_teleop_config(payments: PaymentsConfig) -> FreeTeleopConfig:
+    """Free reservations are the default whenever payments are off — no separate
+    toggle, no fully-open fallback. Validates the shared ``TELEOP_LEASE_MINUTES``.
+    """
+    if payments.enabled:
+        return FreeTeleopConfig(enabled=False)
+    return FreeTeleopConfig(enabled=True, lease_minutes=load_lease_minutes())
 
 
 def index_summary(cfg: PaymentsConfig) -> dict:
@@ -130,3 +158,15 @@ def index_summary(cfg: PaymentsConfig) -> dict:
         "issuer": cfg.issuer,
         "teleop": {"price_usdc": cfg.price_usdc, "lease_minutes": cfg.lease_minutes},
     }
+
+
+def teleop_summary(payments: PaymentsConfig, free: FreeTeleopConfig) -> dict:
+    """The top-level ``teleop`` object reported on ``GET /`` — a sibling of ``payments``
+    (which stays ``{"enabled": false}`` in free mode) so the console can tell "none,"
+    "free," and "paid" apart with one read.
+    """
+    if payments.enabled:
+        return {"reservation": "paid", "lease_minutes": payments.lease_minutes}
+    if free.enabled:
+        return {"reservation": "free", "lease_minutes": free.lease_minutes}
+    return {"reservation": "none", "lease_minutes": None}

@@ -178,11 +178,17 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     StreamableHTTPSessionManager task group. We compose all lifespans
     into the gateway's lifespan.
     """
-    from core.payments_config import PaymentsConfigError, index_summary, load_payments_config
+    from core.payments_config import (
+        PaymentsConfigError,
+        index_summary,
+        load_free_teleop_config,
+        load_payments_config,
+        teleop_summary,
+    )
     from core.reachability import Reachability, probe_forever
     from core.reservation import ReservationRegistry
 
-    # Validated first, so a bad payments config fails before anything is served —
+    # Validated first, so a bad config fails before anything is served —
     # paid-teleop-execution.md §0.1/step 0.3.
     payments_cfg = load_payments_config()
     if payments_cfg.enabled:
@@ -192,6 +198,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
             raise PaymentsConfigError(
                 "PAYMENTS_ENABLED=1 needs: uv sync --extra payments"
             ) from None
+    free_teleop_cfg = load_free_teleop_config(payments_cfg)
 
     registry = ReservationRegistry()  # shared across every robot server + the index
     reachability = Reachability()  # shared between the proxy's real connects and the probe
@@ -222,6 +229,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     app = FastAPI(title="Robot Fleet Gateway", lifespan=lifespan)
     app.state.registry = registry
     app.state.payments = payments_cfg
+    app.state.free_teleop = free_teleop_cfg
     app.state.reachability = reachability
 
     # Everything the gateway serves under a robot's own prefix: the realtime socket
@@ -233,7 +241,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     from core.descriptor_route import CORS_HEADERS, register_descriptor_route
     from core.ws_proxy import register_ws_proxy
 
-    register_ws_proxy(app, plugins, registry, reachability, payments_cfg)
+    register_ws_proxy(app, plugins, registry, reachability, payments_cfg, free_teleop_cfg)
     register_console(app, plugins)
     register_descriptor_route(app, plugins)
 
@@ -255,6 +263,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
             {
                 "service": "Robot Fleet Gateway",
                 "payments": index_summary(payments_cfg),
+                "teleop": teleop_summary(payments_cfg, free_teleop_cfg),
                 "robots": {
                     name: {
                         "mcp_endpoint": f"/{name}/mcp",

@@ -11,9 +11,13 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from core.payments_config import (  # noqa: E402
+    FreeTeleopConfig,
+    PaymentsConfig,
     PaymentsConfigError,
     index_summary,
+    load_free_teleop_config,
     load_payments_config,
+    teleop_summary,
 )
 
 VALID = {
@@ -146,3 +150,46 @@ def test_index_summary_shapes(monkeypatch):
         "issuer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
         "teleop": {"price_usdc": "1.00", "lease_minutes": 5},
     }
+
+
+def test_free_teleop_enabled_by_default():
+    """No separate toggle: free reservations are on whenever payments are off."""
+    cfg = load_free_teleop_config(PaymentsConfig(enabled=False))
+    assert cfg.enabled is True
+    assert cfg.lease_minutes == 5  # the shared TELEOP_LEASE_MINUTES default
+
+
+def test_free_teleop_reads_shared_lease_minutes(monkeypatch):
+    _set(monkeypatch, TELEOP_LEASE_MINUTES="30")
+    cfg = load_free_teleop_config(PaymentsConfig(enabled=False))
+    assert cfg.lease_minutes == 30
+
+
+def test_free_teleop_rejects_bad_lease_minutes(monkeypatch):
+    _set(monkeypatch, TELEOP_LEASE_MINUTES="0")
+    try:
+        load_free_teleop_config(PaymentsConfig(enabled=False))
+        raise AssertionError("expected PaymentsConfigError")
+    except PaymentsConfigError as exc:
+        assert "TELEOP_LEASE_MINUTES" in str(exc)
+
+
+def test_free_teleop_disabled_when_payments_enabled():
+    cfg = load_free_teleop_config(PaymentsConfig(enabled=True))
+    assert cfg.enabled is False
+    assert cfg.lease_minutes is None
+
+
+def test_teleop_summary_shapes():
+    off = PaymentsConfig(enabled=False)
+    paid = PaymentsConfig(enabled=True, lease_minutes=5)
+    free_off = FreeTeleopConfig(enabled=False)
+    free_on = FreeTeleopConfig(enabled=True, lease_minutes=10)
+
+    assert teleop_summary(off, free_off) == {"reservation": "none", "lease_minutes": None}
+    assert teleop_summary(off, free_on) == {"reservation": "free", "lease_minutes": 10}
+    assert teleop_summary(paid, free_off) == {"reservation": "paid", "lease_minutes": 5}
+    # Paid takes precedence in the (unreachable in practice — load_free_teleop_config
+    # only ever constructs free_on when payments.enabled is False) case both configs
+    # claim to be enabled.
+    assert teleop_summary(paid, free_on) == {"reservation": "paid", "lease_minutes": 5}

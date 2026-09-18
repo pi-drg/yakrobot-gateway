@@ -45,6 +45,35 @@ def _payments_env(issuer: str, **overrides) -> dict[str, str]:
     return env
 
 
+def _free_env(**overrides) -> dict[str, str]:
+    """Free reservations are the default whenever payments are off — this is really
+    just an explicit-for-readability alias for "no payments env at all," not a toggle.
+    """
+    env = {"TELEOP_LEASE_MINUTES": "5"}
+    env.update(overrides)
+    return env
+
+
+STATIC_TOKEN = "tok_test"
+
+
+def _static_env(**overrides) -> dict[str, str]:
+    """A pre-shared agent token, admitted the same way in both the paid and free
+    branches (``_admit_static_client``). Used by the plain proxy-mechanics tests below
+    that are about relay/deadman/second-driver behaviour, not about the teleop-gate
+    feature itself — a static token gets two independent connections both admitted
+    under the *same* holder (unlike a free-reservation token, which the gateway would
+    treat as a single lease and could 409 a second socket for), so the robot's own
+    driver-slot logic is what actually gets exercised, matching these tests' intent.
+    Deliberately not a ``_Stack`` default: setting ``MCP_TOKENS`` also switches on MCP
+    tool-call auth (``core.server._make_auth``), which would break anything hitting
+    the MCP mount with no token of its own.
+    """
+    env = {"MCP_TOKENS": f"teleop-ui={STATIC_TOKEN}"}
+    env.update(overrides)
+    return env
+
+
 def _capability_claims(**overrides) -> dict:
     now = int(time.time())
     claims = {
@@ -138,8 +167,8 @@ def test_control_socket_proxies_to_robot():
     async def run():
         from websockets.asyncio.client import connect
 
-        async with _Stack() as stack:
-            async with connect(stack.control) as ws:
+        async with _Stack(env=_static_env()) as stack:
+            async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
                 hello = await _recv_json(ws)
                 assert hello["type"] == "hello"
                 assert hello["deadman_ms"] == 700
@@ -168,8 +197,8 @@ def test_deadman_stops_the_robot_without_heartbeats():
     async def run():
         from websockets.asyncio.client import connect
 
-        async with _Stack() as stack:
-            async with connect(stack.control) as ws:
+        async with _Stack(env=_static_env()) as stack:
+            async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
                 await _recv_json(ws)  # hello
                 await ws.send(json.dumps({"type": "drive", "vx": 1200}))
                 await asyncio.sleep(0.2)
@@ -186,8 +215,9 @@ def test_disconnect_stops_the_robot_and_frees_the_slot():
     async def run():
         from websockets.asyncio.client import connect
 
-        async with _Stack() as stack:
-            async with connect(stack.control) as ws:
+        async with _Stack(env=_static_env()) as stack:
+            url = f"{stack.control}?token={STATIC_TOKEN}"
+            async with connect(url) as ws:
                 await _recv_json(ws)
                 await ws.send(json.dumps({"type": "drive", "vx": 1000}))
                 await asyncio.sleep(0.15)
@@ -197,7 +227,7 @@ def test_disconnect_stops_the_robot_and_frees_the_slot():
             assert stack.sim.STATE.vx == 0
             assert stack.sim.STATE.controller is None
 
-            async with connect(stack.control) as ws2:
+            async with connect(url) as ws2:
                 assert (await _recv_json(ws2))["controller"] is True
 
     asyncio.run(run())
@@ -207,10 +237,16 @@ def test_second_driver_is_view_only():
     async def run():
         from websockets.asyncio.client import connect
 
-        async with _Stack() as stack:
-            async with connect(stack.control) as driver:
+        async with _Stack(env=_static_env()) as stack:
+            url = f"{stack.control}?token={STATIC_TOKEN}"
+            # Same static token both times — the gateway admits both under the same
+            # holder (idempotent reserve), so it's the robot's own driver slot, not
+            # the gateway's admission, that makes the second one view-only. A
+            # free-reservation token would instead 409 the second connect at the
+            # gateway, which would stop this test from exercising the robot at all.
+            async with connect(url) as driver:
                 await _recv_json(driver)
-                async with connect(stack.control) as spotter:
+                async with connect(url) as spotter:
                     assert await _recv_json(spotter) == {"type": "error", "detail": "busy"}
                     hello = await _recv_json(spotter)
                     assert hello["controller"] is False
@@ -227,9 +263,9 @@ def test_video_stream_delivers_decodable_jpeg_frames():
         from PIL import Image
         from websockets.asyncio.client import connect
 
-        async with _Stack() as stack:
+        async with _Stack(env=_static_env()) as stack:
             frames = []
-            async with connect(stack.video) as ws:
+            async with connect(f"{stack.video}?token={STATIC_TOKEN}") as ws:
                 for _ in range(4):
                     frames.append(await asyncio.wait_for(ws.recv(), timeout=5))
 
@@ -256,6 +292,17 @@ async def _refusal(url):
     return ws.close_code, ws.close_reason
 
 
+async def _reserve_token(port=GW_PORT, robot="fakerobot_picar") -> str:
+    """Free reservations are the default now, so most of the plain teleop-mechanics
+    tests below need a token to get past admission at all — this is that token."""
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(f"http://127.0.0.1:{port}/{robot}/lease/reserve")
+        r.raise_for_status()
+        return r.json()["token"]
+
+
 def test_proxy_refuses_robots_without_a_control_server():
     async def run():
         async with _Stack() as stack:
@@ -271,7 +318,7 @@ def test_proxy_refuses_robots_without_a_control_server():
 def test_offline_robot_is_refused_as_retryable():
     """A robot that is off gets 1013, not 1008 — it may just be rebooting."""
     async def run():
-        async with _Stack() as stack:
+        async with _Stack(env=_static_env()) as stack:
             # Point the plugin at a port with nothing behind it, so the upstream
             # connect fails the way it does when the car is switched off.
             os.environ["FAKEROBOT_PICAR_URL"] = "http://127.0.0.1:9"
@@ -283,7 +330,7 @@ def test_offline_robot_is_refused_as_retryable():
                     create_gateway(_load_plugins(["fakerobot_picar"])), GW_PORT + 1
                 )
                 try:
-                    url = f"ws://127.0.0.1:{GW_PORT + 1}/fakerobot_picar/ws/control"
+                    url = f"ws://127.0.0.1:{GW_PORT + 1}/fakerobot_picar/ws/control?token={STATIC_TOKEN}"
                     code, reason = await _refusal(url)
                     assert code == 1013
                     assert reason == "robot offline"
@@ -355,13 +402,19 @@ def test_index_reports_payments_disabled_by_default():
 
 
 def test_wrong_static_token_refusal_reaches_client():
-    """core/ws_proxy.py's unauthorized branch must go through _refuse(), not a bare
-    ws.close() before accept() — otherwise the browser only ever sees 1006."""
+    """A token that matches no static client falls through to the free-lease
+    verifier, which doesn't recognize it either — "invalid lease", not a distinct
+    "unauthorized" (there's only one opaque ?token= string on the wire; the gateway
+    can't tell "wrong static token" from "wrong free token" apart, and consolidating
+    them means a stale deep-link lands on the Reserve card instead of dead-ending,
+    since "invalid lease" is a PAYWALL_REASONS the console retries from). This test's
+    real purpose: the refusal must go through _refuse(), not a bare ws.close() before
+    accept() — otherwise the browser only ever sees 1006."""
     async def run():
-        async with _Stack(env={"MCP_TOKENS": "teleop-ui=tok_def"}) as stack:
+        async with _Stack(env=_static_env()) as stack:
             code, reason = await _refusal(stack.control + "?token=wrongtoken")
             assert code == 1008
-            assert reason == "unauthorized"
+            assert reason == "invalid lease"
 
     asyncio.run(run())
 
@@ -460,16 +513,17 @@ def test_video_can_be_disabled_gateway_wide():
 
         os.environ["VIDEO_ENABLED"] = "0"
         try:
-            async with _Stack() as stack:
+            async with _Stack(env=_static_env()) as stack:
                 # 1008 must reach the browser intact — it is the signal the
                 # console keys off to stop retrying a refusal that will not
-                # change until the gateway is restarted.
+                # change until the gateway is restarted. video_enabled() is checked
+                # before admission, so no token is needed to reach this refusal.
                 code, reason = await _refusal(stack.video)
                 assert code == 1008
                 assert "video disabled" in reason
 
                 # Control is untouched — the car stays drivable, just blind.
-                async with connect(stack.control) as ws:
+                async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
                     assert (await _recv_json(ws))["type"] == "hello"
         finally:
             os.environ.pop("VIDEO_ENABLED", None)
@@ -481,17 +535,6 @@ def test_video_can_be_disabled_gateway_wide():
 # Paid teleop — capability admission, reservation binding, expiry.
 # paid-teleop-execution.md phase 2, step 2.2.
 # --------------------------------------------------------------------------
-
-def test_payments_disabled_keeps_todays_behaviour():
-    async def run():
-        from websockets.asyncio.client import connect
-
-        async with _Stack() as stack:
-            async with connect(stack.control) as ws:
-                assert (await _recv_json(ws))["type"] == "hello"
-
-    asyncio.run(run())
-
 
 def test_no_token_refused_when_payments_enabled():
     async def run():
@@ -859,15 +902,190 @@ def test_release_missing_token_refused():
     asyncio.run(run())
 
 
-def test_release_refused_when_payments_disabled():
+# There is no "neither mode enabled" state to test any more — free.enabled is always
+# `not payments.enabled` (see load_free_teleop_config), so /lease/release's own
+# `if not payments.enabled and not free.enabled` 404 branch is provably unreachable.
+# Kept in the source as cheap insurance against a future third mode, not tested here.
+
+
+# ---- free (unpaid) teleop reservations --------------------------------------------
+# The unpaid sibling of everything above: same registry/expiry/release machinery, an
+# unsigned gateway-local token standing in for a paid capability.
+
+
+def test_no_token_refused_when_free_reservations_enabled():
+    async def run():
+        async with _Stack(env=_free_env()) as stack:
+            assert await _refusal(stack.control) == (1008, "reservation required")
+            assert await _refusal(stack.video) == (1008, "reservation required")
+
+    asyncio.run(run())
+
+
+def test_reserve_then_connect_admits_and_reserves():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _Stack(env=_free_env()) as stack:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve"
+                )
+                assert r.status_code == 200
+                body = r.json()
+                assert body["robot"] == "fakerobot_picar"
+                token = body["token"]
+
+                async with connect(f"{stack.control}?token={token}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+
+                    r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                    reservation = r.json()["robots"]["fakerobot_picar"]["reservation"]
+                    assert reservation["holder"] == f"free:{body['lease']}"
+
+    asyncio.run(run())
+
+
+def test_reserve_while_held_returns_409_with_reservation():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _Stack(env=_free_env()) as stack:
+            async with httpx.AsyncClient() as client:
+                first = (
+                    await client.post(f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve")
+                ).json()
+                async with connect(f"{stack.control}?token={first['token']}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+
+                    r = await client.post(
+                        f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve"
+                    )
+                    assert r.status_code == 409
+                    assert r.json()["detail"] == "robot is held by another session"
+                    assert r.json()["reservation"]["reserved"] is True
+
+    asyncio.run(run())
+
+
+def test_free_release_frees_the_robot_immediately():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _Stack(env=_free_env()) as stack:
+            async with httpx.AsyncClient() as client:
+                first = (
+                    await client.post(f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve")
+                ).json()
+                async with connect(f"{stack.control}?token={first['token']}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+
+                    r = await client.post(
+                        f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                        json={"token": first["token"]},
+                    )
+                    assert r.status_code == 200
+                    assert r.json() == {"released": True}
+
+                    with pytest.raises(Exception):
+                        await asyncio.wait_for(ws.recv(), timeout=5)
+                    assert (ws.close_code, ws.close_reason) == (1008, "lease released")
+
+                r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                assert r.json()["robots"]["fakerobot_picar"]["reservation"]["reserved"] is False
+
+                # Free immediately — a second reservation does not wait out the first's
+                # unused remaining minutes.
+                second = await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve"
+                )
+                assert second.status_code == 200
+
+    asyncio.run(run())
+
+
+def test_released_free_token_cannot_reconnect():
+    """Unlike a paid capability, a released free token has no cryptographic validity to
+    fall back on — deleting it from free_leases *is* the released-set, so reconnecting
+    with it is just an unknown token, not a distinct "released" reason."""
     async def run():
         import httpx
 
-        async with _Stack():
+        async with _Stack(env=_free_env()) as stack:
+            async with httpx.AsyncClient() as client:
+                first = (
+                    await client.post(f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve")
+                ).json()
+                await client.post(
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
+                    json={"token": first["token"]},
+                )
+
+            code, reason = await _refusal(f"{stack.control}?token={first['token']}")
+            assert (code, reason) == (1008, "invalid lease")
+
+    asyncio.run(run())
+
+
+def test_static_token_still_admits_with_free_mode_on():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        env = _free_env(MCP_TOKENS="operator=tok_def")
+        async with _Stack(env=env) as stack:
+            async with connect(f"{stack.control}?token=tok_def") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+                    reservation = r.json()["robots"]["fakerobot_picar"]["reservation"]
+                    assert reservation["holder"] == "operator"
+
+    asyncio.run(run())
+
+
+def test_free_lease_expires_after_the_configured_minutes(monkeypatch):
+    """Mirrors test_socket_closes_at_exp, but a free lease's exp is entirely
+    gateway-derived (no client-minted exp=now+2 trick available), so the tunable
+    SECONDS_PER_LEASE_MINUTE constant is patched down instead of sleeping a real
+    TELEOP_LEASE_MINUTES worth of minutes."""
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        import core.ws_proxy as ws_proxy
+
+        monkeypatch.setattr(ws_proxy, "SECONDS_PER_LEASE_MINUTE", 1)
+        async with _Stack(env=_free_env(TELEOP_LEASE_MINUTES="2")) as stack:
+            async with httpx.AsyncClient() as client:
+                body = (
+                    await client.post(f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve")
+                ).json()
+            async with connect(f"{stack.control}?token={body['token']}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+                with pytest.raises(Exception):
+                    await asyncio.wait_for(ws.recv(), timeout=5)
+                assert ws.close_code == 1008
+                assert ws.close_reason == "lease expired"
+
+    asyncio.run(run())
+
+
+def test_free_reservation_endpoints_refused_when_free_mode_off():
+    """Free mode has no toggle of its own — the only way to turn it off is turning
+    payments on, since the two are `not` of each other (load_free_teleop_config)."""
+    async def run():
+        import httpx
+
+        _, issuer = _new_issuer()
+        async with _Stack(env=_payments_env(issuer)):
             async with httpx.AsyncClient() as client:
                 r = await client.post(
-                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release",
-                    json={"token": "irrelevant"},
+                    f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve"
                 )
                 assert r.status_code == 404
 
