@@ -976,7 +976,12 @@
       : "";
 
     const online = latestIndex?.robots?.[robotName]?.online === true;
-    if (payments.url && online) {
+    // Same reservation the banner above already reads — a visitor with no capability
+    // of their own is never "the" holder, so this is simpler than paintReservationBanner's
+    // self-exclusion check: any reservation at all means someone else has it.
+    const reservation = latestIndex?.robots?.[robotName]?.reservation;
+    const heldByOther = !!reservation?.reserved;
+    if (payments.url && online && !heldByOther) {
       const u = new URL(payments.url);
       u.searchParams.set("gateway", location.host);
       u.searchParams.set("robot", robotName);
@@ -985,7 +990,11 @@
       els.paywallLink.removeAttribute("aria-disabled");
     } else {
       els.paywallLink.removeAttribute("href");
-      els.paywallLink.textContent = online ? "Payments unavailable" : "Robot is offline";
+      els.paywallLink.textContent = !online
+        ? "Robot is offline"
+        : heldByOther
+        ? "Robot is in use"
+        : "Payments unavailable";
       els.paywallLink.setAttribute("aria-disabled", "true");
     }
   }
