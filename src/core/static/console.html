@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Drive picar-finland-01</title>
+<title>Robot driving console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
@@ -431,7 +431,7 @@
 
 <header>
   <div class="ident">
-    <span class="name" id="unit">picar-finland-01</span>
+    <span class="name" id="unit">this robot</span>
     <span class="build" id="build">connecting</span>
   </div>
 
@@ -569,7 +569,7 @@
 
 <dialog id="help">
   <div class="body">
-    <h2>Driving picar-finland-01</h2>
+    <h2>Driving this robot</h2>
     <p class="lede">The car stops itself when it stops hearing from you. Release
       every key and it halts within the deadman window.</p>
     <table>
@@ -640,6 +640,32 @@
   let outstanding = 0, lastRtt = null;
   const rtts = [];                          // null entries are missed pongs
   let pan = 90, tilt = 90, lastSent = null;
+
+  // ---- naming -------------------------------------------------------------
+  // One file serves every robot, so the labels start out generic and this reads
+  // the robot's own name from its descriptor — public, CORS-open, and served by
+  // the gateway a few feet away rather than the robot across the link. When the
+  // page is served by a robot directly there is no gateway index to name it from
+  // and the generic labels stand, which is honest rather than wrong.
+  async function applyRobotName() {
+    if (!robotName) return;
+    try {
+      const res = await fetch(`/${robotName}/descriptor`, {
+        headers: { "ngrok-skip-browser-warning": "1" },
+      });
+      if (!res.ok) return;
+      const { name } = await res.json();
+      if (!name) return;
+      document.title = `Drive ${name}`;
+      const unit = $("unit");
+      if (unit) unit.textContent = name;
+      const help = document.querySelector("#help h2");
+      if (help) help.textContent = `Driving ${name}`;
+    } catch (err) {
+      // A console that cannot read its own name is still a working console.
+    }
+  }
+  applyRobotName();
 
   // ---- key state ----------------------------------------------------------
   const KEYS = ["w","a","s","d","q","e","z","c"];
