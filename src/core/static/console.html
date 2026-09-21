@@ -687,12 +687,18 @@
     // carpet, so straight runs use the motor maximum (that car's unit.json raises
     // its max_duty to 4095) and spins 3000 — twitchy on a hard floor, where the
     // speed slider takes them down. A robot's max_duty still caps them.
-    if (on.has("fwd")) vx += 4095;
-    if (on.has("back")) vx -= 4095;
+    const forwardDuty = robotName === "picar_freenove" ? 1200 : 4095;
+    if (on.has("fwd")) vx += forwardDuty;
+    if (on.has("back")) vx -= forwardDuty;
     if (on.has("strafeL")) vy += 1400;
     if (on.has("strafeR")) vy -= 1400;
-    if (on.has("spinL")) om += 3000;
-    if (on.has("spinR")) om -= 3000;
+    // Keep the Freenove's measured turn power while the Adeept uses its own
+    // higher duty profile. Other holonomic robots retain their proven turn.
+    const turnDuty = robotName === "picar_freenove"
+      ? (cfg.holonomic ? 900 : 1400)
+      : (robotName === "picar_adeept" ? 3000 : 900);
+    if (on.has("spinL")) om += turnDuty;
+    if (on.has("spinR")) om -= turnDuty;
     if (on.has("diagFL")) { vx += 1000; vy += 1000; }
     if (on.has("diagFR")) { vx += 1000; vy -= 1000; }
     if (on.has("diagBL")) { vx -= 1000; vy += 1000; }

@@ -174,6 +174,9 @@ pays the gas). To add your robot:
 The gateway holds no key and never sends a transaction. It checks the player's signature
 locally and reads the contract once per ride; if the RPC is down, no new rides start.
 
+On the Freenove PiCar, ordinary-wheel turns ask for 1400 duty (1120 at 80%
+speed); mecanum turns retain 900. The robot's duty cap still applies.
+
 ## End-to-end flow
 
 [`yakrobot-descriptor`](https://github.com/pi-drg/yakrobot-descriptor) is the seam
