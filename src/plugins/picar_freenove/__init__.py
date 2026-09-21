@@ -57,7 +57,11 @@ def _servo_angle(value) -> int | None:
 class PicarFreenovePlugin(RobotPlugin):
     def metadata(self) -> RobotMetadata:
         return RobotMetadata(
-            name="PiCar-Finland-01",
+            # The upstream default here was "PiCar-Finland-01" — the name of the
+            # reference car the organizers keep in Finland, shared with
+            # "Tumbller-Finland-01" and a default host of picar-finland-01.local.
+            # This car is neither theirs nor in Finland, so it carries its own.
+            name="PiCar-Seattle-01",
             description=(
                 "A Freenove 4WD Smart Car on a Raspberry Pi: drive and strafe, "
                 "pan/tilt camera with snapshots, ultrasonic distance and sweep, "

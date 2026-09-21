@@ -132,7 +132,7 @@ def test_sensing_delivery_carries_readings_and_identity():
     delivery = result["delivery_data"]
     assert {"type": "distance", "value": 124.7, "unit": "cm"} in delivery["readings"]
     assert {"type": "battery_voltage", "value": 8.02, "unit": "volts"} in delivery["readings"]
-    assert delivery["robot_name"] == "PiCar-Finland-01"
+    assert delivery["robot_name"] == "PiCar-Seattle-01"
     assert delivery["stationary"] is True
     assert "capture" not in delivery
     assert [call[0] for call in adapter.calls] == ["distance", "battery"]
