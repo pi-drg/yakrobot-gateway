@@ -507,7 +507,8 @@
       <label class="label" for="speed">Speed limit</label>
       <span class="val num"><b id="speedVal">80</b><i>%</i></span>
       <input id="speed" type="range" min="10" max="100" step="5" value="80" />
-      <p class="hint">Server clamps every duty to <b class="num" id="maxDuty">—</b>.</p>
+      <p class="hint">Server clamps every duty to <b class="num" id="maxDuty">—</b>.
+        Sets driving speed; turns reach that cap at 80% and above.</p>
     </div>
 
     <button class="ghost" id="padBtn" type="button">Touch controls</button>
@@ -591,6 +592,10 @@
         Chromium is the safer browser for driving.</li>
       <li><b>Switching tabs stops the car.</b> Losing focus clears every held key
         and sends a stop.</li>
+      <li><b>Turns ask for full power.</b> Pivoting has to break four tyres
+        loose at once, so <kbd>A</kbd>/<kbd>D</kbd> take the robot's whole duty
+        allowance whenever the speed slider is at 80% or above — a scaled-down
+        pivot stalls on carpet instead of turning gently.</li>
       <li><b>One driver at a time.</b> A second browser sees the video but cannot
         steer.</li>
     </ul>
@@ -718,11 +723,12 @@
     if (on.has("back")) vx -= forwardDuty;
     if (on.has("strafeL")) vy += 1400;
     if (on.has("strafeR")) vy -= 1400;
-    // Keep the Freenove's measured turn power while the Adeept uses its own
-    // higher duty profile. Other holonomic robots retain their proven turn.
-    const turnDuty = robotName === "picar_freenove"
-      ? (cfg.holonomic ? 900 : 1400)
-      : (robotName === "picar_adeept" ? 3000 : 900);
+    // Freenove pivots need the robot's full allowance on carpet. Preserve the
+    // Adeept's higher measured turn power and the mecanum turn profile.
+    const TURN_DUTY_CEILING = 2400, TURN_FULL_PCT = 80;
+    const turnDuty = cfg.holonomic ? 900
+      : robotName === "picar_freenove" ? Math.min(cfg.maxDuty, TURN_DUTY_CEILING)
+      : 3000;
     if (on.has("spinL")) om += turnDuty;
     if (on.has("spinR")) om -= turnDuty;
     if (on.has("diagFL")) { vx += 1000; vy += 1000; }
@@ -732,11 +738,17 @@
     if (!cfg.holonomic) vy = 0;              // ordinary wheels cannot strafe
 
     const scale = Number(els.speed.value) / 100;
+    // The slider still slows a pivot down, but only below the default setting:
+    // above TURN_FULL_PCT there is nothing left to give, and a pivot that is
+    // starved of torque is not a gentler turn, it is a stalled car.
+    const turnScale = robotName === "picar_freenove" && !cfg.holonomic
+      ? Math.min(1, scale / (TURN_FULL_PCT / 100))
+      : scale;
     const cap = cfg.maxDuty;
     return {
       vx: clamp(Math.round(vx * scale), -cap, cap),
       vy: clamp(Math.round(vy * scale), -cap, cap),
-      omega: clamp(Math.round(om * scale), -cap, cap),
+      omega: clamp(Math.round(om * turnScale), -cap, cap),
     };
   }
 

@@ -174,8 +174,11 @@ pays the gas). To add your robot:
 The gateway holds no key and never sends a transaction. It checks the player's signature
 locally and reads the contract once per ride; if the RPC is down, no new rides start.
 
-On the Freenove PiCar, ordinary-wheel turns ask for 1400 duty (1120 at 80%
-speed); mecanum turns retain 900. The robot's duty cap still applies.
+The Freenove console uses its measured drive power (1200 times the slider).
+An ordinary-wheel pivot asks for the robot's full duty allowance at 80% speed
+and above, bounded at 2400; below 80%, the slider scales the pivot down. Raise
+`control_max_duty` in the unit's `/etc/yakrobot/unit.json` only after checking
+the car on the floor. The Adeept retains its higher drive and turn profile.
 
 ## End-to-end flow
 
