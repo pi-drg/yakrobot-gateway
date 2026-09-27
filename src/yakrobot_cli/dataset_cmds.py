@@ -9,6 +9,7 @@ lifting lives in ``core.dataset_timeline`` and ``core.dataset_export`` (lerobot,
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -84,3 +85,26 @@ def sessions(robot: str = typer.Argument(..., help="Robot plugin name (e.g. fake
             f"{r['video']:>6} {r['dropped']:>5} {r['holder_kind']:<7} "
             f"{_fmt(r['rtt_lan_ms']):>8} {_fmt(r['rtt_browser_ms']):>11}"
         )
+
+
+@dataset_app.command()
+def export(
+    robot: str = typer.Argument(..., help="Robot plugin name (e.g. fakerobot_picar)"),
+    sessions: Optional[str] = typer.Option(
+        None, "--sessions", help="Comma-separated session ids to export"
+    ),
+    segments: Optional[str] = typer.Option(
+        None, "--segments", help="TOML file of [[segment]] session/start_s/end_s/task entries"
+    ),
+    task: str = typer.Option("", "--task", help="Default task label for every episode"),
+    fps: int = typer.Option(15, "--fps", help="Export frame rate"),
+    repo_id: str = typer.Option(..., "--repo-id", help="LeRobot repo id (e.g. myname/dataset)"),
+    out: Optional[str] = typer.Option(None, "--out", help="Output root (default ./out/<repo-id>)"),
+    shift_rtt: bool = typer.Option(
+        False, "--shift-rtt", help="Shift actions earlier by the tunnel round trip"
+    ),
+):
+    """Export staged sessions to a LeRobotDataset v3 (needs `uv sync --extra dataset-export`)."""
+    from . import dataset_export
+
+    dataset_export.export(robot, sessions, segments, task, fps, repo_id, out, shift_rtt)

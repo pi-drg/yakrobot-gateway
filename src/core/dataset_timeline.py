@@ -55,6 +55,8 @@ class LoadedSession:
     features_spec_version: int
     robot: str
     gateway: str
+    started_utc: str | None = None
+    ended_utc: str | None = None
 
 
 def _median(values: list[float]) -> float | None:
@@ -105,6 +107,8 @@ def load_session(path) -> LoadedSession:
         features_spec_version=meta.get("features_spec_version"),
         robot=meta.get("robot", ""),
         gateway=meta.get("gateway", ""),
+        started_utc=meta.get("started_utc"),
+        ended_utc=meta.get("ended_utc"),
     )
 
 

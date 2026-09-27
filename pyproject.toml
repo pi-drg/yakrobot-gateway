@@ -31,6 +31,12 @@ export = ["yakrobot-descriptor[model]"]
 payments = ["eth-keys>=0.7", "eth-hash[pycryptodome]>=0.7", "httpx>=0.28.1"]
 # Per-operator Stripe fiat gate: raw httpx against the Stripe REST API (no SDK).
 stripe = ["httpx>=0.28.1"]
+# Converts staged sessions to LeRobotDataset v3 (the offline `dataset export` command).
+# lerobot is a git pin (the same v0.6.0 LeLab pins) and imports only inside
+# src/yakrobot_cli/dataset_export.py — never in the serving gateway, and never in `all`
+# or `dev` so torch stays out of the serving environment. `[dataset]` is required: the
+# bare package omits the datasets/pyarrow/av deps LeRobotDataset needs (plan §0.9).
+dataset-export = ["lerobot[dataset] @ git+https://github.com/huggingface/lerobot@v0.6.0"]
 all = [
     "httpx>=0.28.1", "djitellopy>=2.5.0", "pillow>=11.0", "numpy>=2.0",
     "eth-keys>=0.7", "eth-hash[pycryptodome]>=0.7",
@@ -61,6 +67,11 @@ build-backend = "hatchling.build"
 # App layout: only the CLI package is packaged. It puts src/ on sys.path at runtime so
 # the flat core/ and plugins/ modules resolve from the editable checkout.
 packages = ["src/yakrobot_cli"]
+
+[tool.hatch.metadata]
+# The dataset-export extra pins lerobot by git URL (the same v0.6.0 LeLab pins) — a PEP
+# 508 direct reference, which hatchling refuses to embed in metadata unless told it's OK.
+allow-direct-references = true
 
 [tool.uv]
 prerelease = "allow"
