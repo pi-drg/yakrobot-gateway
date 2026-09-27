@@ -225,6 +225,11 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
         # reason, and that reason should be visible above uvicorn's info-level floor.
         logger.warning("recording disabled: %s", recording_cfg.disabled_reason)
 
+    # The dataset catalogue, hot-reloaded from DATASETS_FILE (§0.6).
+    from core.datasets_listing import DatasetListings
+
+    listings = DatasetListings(os.getenv("DATASETS_FILE"), set(plugins))
+
     registry = ReservationRegistry()  # shared across every robot server + the index
     reachability = Reachability()  # shared between the proxy's real connects and the probe
 
@@ -259,6 +264,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     app.state.recording = recording_cfg
     app.state.r2 = r2_cfg
     app.state.redeem_days = redeem_days
+    app.state.listings = listings
     app.state.reachability = reachability
 
     # Everything the gateway serves under a robot's own prefix: the realtime socket
@@ -313,6 +319,9 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                             and recording_cfg.disabled_reason is None
                             and plugin.dataset_features() is not None
                         ),
+                        "datasets": [
+                            listing.index_entry() for listing in listings.for_robot(name)
+                        ],
                         # True/False once observed; null for a robot with no control
                         # server at all (never probed, and never will be).
                         "online": (
