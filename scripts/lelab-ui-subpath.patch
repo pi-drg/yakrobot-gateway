@@ -1,0 +1,131 @@
+LeLab UI sub-path patch (execution plan 2026-09-25-teleop-datasets §0.19).
+LeLab is Apache-2.0 (huggingface/leLab). This patch changes nothing else.
+diff --git a/frontend/src/lib/basePath.ts b/frontend/src/lib/basePath.ts
+new file mode 100644
+--- /dev/null
++++ b/frontend/src/lib/basePath.ts
+@@ -0,0 +1,2 @@
++export const asset = (p: string): string =>
++  import.meta.env.BASE_URL + p.replace(/^\//, "");
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -33,7 +33,7 @@
+             <HfAuthProvider>
+               <UrdfProvider>
+                 <DragAndDropProvider>
+-                  <BrowserRouter>
++                  <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+                     <SingleTabGuard>
+                       <OnboardingProvider>
+                         <TeleopStopNotice />
+--- a/frontend/src/components/UrdfViewer.tsx
++++ b/frontend/src/components/UrdfViewer.tsx
+@@ -1,3 +1,4 @@
++import { asset } from "@/lib/basePath";
+ import React, {
+   useEffect,
+   useRef,
+@@ -84,7 +85,7 @@
+     if (url.startsWith("package://so_arm_description/meshes/")) {
+       const modifiedUrl = url.replace(
+         "package://so_arm_description/meshes/",
+-        "/so-101-urdf/meshes/"
++        asset("/so-101-urdf/meshes/")
+       );
+       console.log(`🔗 Modified URL (package): ${modifiedUrl}`);
+       return modifiedUrl;
+@@ -94,7 +95,7 @@
+     if (url.includes("so_arm_description/meshes/")) {
+       const modifiedUrl = url.replace(
+         /.*so_arm_description\/meshes\//,
+-        "/so-101-urdf/meshes/"
++        asset("/so-101-urdf/meshes/")
+       );
+       console.log(`🔗 Modified URL (partial): ${modifiedUrl}`);
+       return modifiedUrl;
+@@ -104,7 +105,7 @@
+     if (url.includes("/so-101-urdf/so_arm_description/meshes/")) {
+       const modifiedUrl = url.replace(
+         "/so-101-urdf/so_arm_description/meshes/",
+-        "/so-101-urdf/meshes/"
++        asset("/so-101-urdf/meshes/")
+       );
+       console.log(`🔗 Modified URL (problematic path): ${modifiedUrl}`);
+       return modifiedUrl;
+@@ -116,7 +117,7 @@
+       !url.startsWith("/") &&
+       !url.startsWith("http")
+     ) {
+-      const modifiedUrl = `/so-101-urdf/meshes/${url}`;
++      const modifiedUrl = asset(`/so-101-urdf/meshes/${url}`);
+       console.log(`🔗 Modified URL (relative): ${modifiedUrl}`);
+       return modifiedUrl;
+     }
+@@ -141,7 +142,7 @@
+ 
+     // Determine which URDF to load - fixed path to match the actual available file
+     const urdfPath = isDefaultModel
+-      ? "/so-101-urdf/urdf/so101_new_calib.urdf"
++      ? asset("/so-101-urdf/urdf/so101_new_calib.urdf")
+       : customUrdfPath || "";
+ 
+     // Set the package path for the default model
+--- a/frontend/src/contexts/UrdfContext.tsx
++++ b/frontend/src/contexts/UrdfContext.tsx
+@@ -1,3 +1,4 @@
++import { asset } from "@/lib/basePath";
+ import React, {
+   createContext,
+   useState,
+@@ -84,7 +85,7 @@
+     let cancelled = false;
+     (async () => {
+       try {
+-        const response = await fetch("/so-101-urdf/urdf/so101_new_calib.urdf");
++        const response = await fetch(asset("/so-101-urdf/urdf/so101_new_calib.urdf"));
+         if (!response.ok) {
+           throw new Error(`Failed to fetch default Urdf: ${response.statusText}`);
+         }
+--- a/frontend/src/components/Logo.tsx
++++ b/frontend/src/components/Logo.tsx
+@@ -1,3 +1,4 @@
++import { asset } from "@/lib/basePath";
+ 
+ import React from 'react';
+ import { cn } from '@/lib/utils';
+@@ -11,7 +12,7 @@
+   iconOnly = false
+ }) => {
+   return <div className={cn("flex items-center gap-2", className)}>
+-      <img src="/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png" alt="LeLab Logo" className="h-8 w-8" />
++      <img src={asset("/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png")} alt="LeLab Logo" className="h-8 w-8" />
+       {!iconOnly && <span className="font-bold text-white text-2xl">LeLab</span>}
+     </div>;
+ };
+--- a/frontend/src/components/landing/LandingTopBar.tsx
++++ b/frontend/src/components/landing/LandingTopBar.tsx
+@@ -1,3 +1,4 @@
++import { asset } from "@/lib/basePath";
+ import React from "react";
+ import HfAuthChip from "./HfAuthChip";
+ import TourLauncher from "@/components/onboarding/TourLauncher";
+@@ -8,7 +9,7 @@
+       <div className="mx-auto flex h-12 max-w-7xl items-center justify-between px-4">
+         <div className="flex items-center gap-2">
+           <img
+-            src="/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png"
++            src={asset("/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png")}
+             alt="LeLab"
+             className="h-7 w-7"
+           />
+--- a/frontend/src/contexts/ApiContext.tsx
++++ b/frontend/src/contexts/ApiContext.tsx
+@@ -8,7 +8,7 @@
+ 
+ const ApiContext = createContext<ApiContextType | undefined>(undefined);
+ 
+-const STORAGE_KEY = "lelab.apiBaseUrl";
++const STORAGE_KEY = "lelab.apiBaseUrl:" + import.meta.env.BASE_URL;
+ const DEFAULT_LOCALHOST = "http://localhost:8000";
+ 
+ const httpToWs = (url: string): string => url.replace(/^http(s?):/, "ws$1:");

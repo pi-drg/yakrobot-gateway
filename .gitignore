@@ -22,3 +22,6 @@ mcp-tokens.txt
 # Generated robot descriptors (source of truth is each plugin's metadata(); these bake
 # in a deployment-specific ngrok domain — regenerate with scripts/export_descriptor.py)
 robot-descriptors/
+
+# LeLab's built UI bundle (regenerate with scripts/build_lelab_ui.sh — never vendored)
+src/plugins/lelab_so101/ui_dist/
