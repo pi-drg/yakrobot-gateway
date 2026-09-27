@@ -94,7 +94,9 @@ def presign(
 
     parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
     scheme = parsed.scheme or "https"
-    base_host = (parsed.hostname or endpoint).lower()
+    # netloc (not hostname) so a non-standard port on a local R2 fake survives into the
+    # URL and the signed host; Cloudflare's endpoint has no port so this is a no-op there.
+    base_host = (parsed.netloc or endpoint).lower()
     host = f"{bucket}.{base_host}" if virtual_host else base_host
 
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")

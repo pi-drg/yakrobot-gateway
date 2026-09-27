@@ -40,7 +40,7 @@ def create_fake_r2(state: FakeR2State, *, region: str = "auto") -> FastAPI:
             return Response(status_code=403, content="unknown access key")
 
         host_header = request.headers.get("host", "")
-        host = (urlparse(f"//{host_header}").hostname or host_header).lower()
+        host = (urlparse(f"//{host_header}").netloc or host_header).lower()
         if not verify(method, host, request.url.path, params, secret, region):
             return Response(status_code=403, content="bad signature")
 

@@ -157,7 +157,8 @@ def export(robot, sessions, segments_file, task, fps, repo_id, out, shift_rtt):
         raise SystemExit(f"output directory {root} already exists and is not empty")
 
     dataset = LeRobotDataset.create(
-        repo_id=repo_id, fps=fps, features=features_dict, root=root, use_videos=True
+        repo_id=repo_id, fps=fps, features=features_dict, root=root,
+        use_videos=True, robot_type=robot,
     )
     frame_count = 0
     for seg_task, episode in collected:

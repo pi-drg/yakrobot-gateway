@@ -116,3 +116,28 @@ def validate(path: str = typer.Argument(..., help="Path to a LeRobot v3 dataset"
     from . import dataset_export
 
     dataset_export.validate(path)
+
+
+@dataset_app.command()
+def publish(
+    path: str = typer.Argument(..., help="Path to a LeRobot v3 dataset"),
+    store: str = typer.Option(..., "--store", help="hf or r2"),
+    dataset_id: str = typer.Option(..., "--id", help="Dataset id (^[a-z0-9][a-z0-9_-]{2,63}$)"),
+    price_usdc: Optional[str] = typer.Option(None, "--price-usdc"),
+    price_cents: Optional[int] = typer.Option(None, "--price-cents"),
+    currency: str = typer.Option("usd", "--currency"),
+    license_: str = typer.Option(None, "--license"),
+    source: str = typer.Option("gateway", "--source"),
+    repo_id: Optional[str] = typer.Option(None, "--repo-id", help="hf owner/name"),
+    datasets_file: Optional[str] = typer.Option(None, "--datasets-file"),
+    robot: Optional[str] = typer.Option(None, "--robot"),
+):
+    """Publish a validated v3 dataset to hf or r2 and append its listing."""
+    from . import dataset_publish
+
+    dataset_publish.publish(
+        path, store, dataset_id,
+        price_usdc=price_usdc, price_cents=price_cents, currency=currency,
+        license_=license_, source=source, repo_id=repo_id,
+        datasets_file=datasets_file, robot=robot,
+    )
