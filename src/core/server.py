@@ -292,9 +292,13 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     # makes these dead code.
     from core.console import register_console
     from core.descriptor_route import CORS_HEADERS, register_descriptor_route
+    from core.http_relay import register_http_relay
     from core.ws_proxy import register_ws_proxy
 
     register_ws_proxy(app, plugins, registry, reachability, payments_cfg, free_teleop_cfg, stripe_cfg, recording_cfg)
+    # http_relay before register_console: the console 307-redirects static-UI robots to
+    # /{robot}/ui/, which http_relay serves.
+    register_http_relay(app, plugins, registry)
     register_console(app, plugins, static_ui_robots)
     register_descriptor_route(app, plugins)
 
