@@ -49,7 +49,7 @@ yakrobot-gateway/
 │   │   ├── descriptor.py  # build_descriptor: plugin metadata → RobotDescriptor (export extra)
 │   │   └── descriptor_route.py # /{robot}/descriptor — the same JSON, served live + CORS
 │   └── plugins/           # One sub-package per robot (device-neutral; IoT/printers later)
-│       ├── tumbller/  tello/  fakerobot/  picar_freenove/  fakerobot_picar/  _template/
+│       ├── tumbller/  tello/  fakerobot/  picar_freenove/  fakerobot_picar/  lelab_so101/  _template/
 └── scripts/               # serve.py + export_descriptor.py (emits the JSON contract)
 ```
 
@@ -65,6 +65,10 @@ yakrobot-gateway/
   `/{robot}/descriptor` (the descriptor JSON, live),
   `/{robot}/stripe/start` and `/{robot}/stripe/confirm` (card teleop checkout, when the
   Stripe gate is enabled).
+  For a plugin with a served UI (`static_ui()`): `/{robot}/ui/` (the SPA bundle behind an
+  operator session), `/{robot}/ui/login` / `/{robot}/ui/logout` (session), and
+  `/{robot}/api/{path}` + `/{robot}/api/ws/{path}` (the allowlisted relay to the robot's
+  own server, when the plugin declares `http_api()`).
 - Every `/{robot}/mcp` tool passes through `ReservationMiddleware` — a robot reserved by
   one agent rejects control calls from others (identity = per-agent token `client_id`).
 - Plugin auto-discovery scans `src/plugins/` for `RobotPlugin` subclasses.
@@ -75,11 +79,13 @@ yakrobot-gateway/
   gateway state where a socket opens with no reservation at all. The robot's own
   single-driver rule and deadman timer are the backstop either way.
 
-**Route order is load-bearing.** `register_ws_proxy`, `register_console` and
-`register_descriptor_route` must all run before `app.mount(f"/{name}", ...)` in
-`create_gateway`. Starlette matches in registration order and a mount claims every path
-beneath its prefix, so a `/{robot}/ui`, `/{robot}/ws/*` or `/{robot}/descriptor` route
-added after the mounts is dead code that never sees a request.
+**Route order is load-bearing.** `register_ws_proxy`, `register_http_relay` (before
+`register_console`, since the console 307-redirects static-UI robots to it),
+`register_console`, `register_descriptor_route` and `register_dataset_routes` must all
+run before `app.mount(f"/{name}", ...)` in `create_gateway`. Starlette matches in
+registration order and a mount claims every path beneath its prefix, so a `/{robot}/ui`,
+`/{robot}/ws/*`, `/{robot}/api/*` or `/{robot}/descriptor` route added after the mounts
+is dead code that never sees a request.
 
 **`/` and `/{robot}/descriptor` are the only cross-origin surfaces.** Both carry
 `Access-Control-Allow-Origin: *` and an `OPTIONS` preflight handler, because the browser
@@ -116,6 +122,15 @@ core changes:
   The Tello opts out this way — it speaks UDP and has no socket to proxy.
 - `control_auth_token()` — the robot's own token, or `None`. It is injected into the
   upstream handshake so the browser never holds it.
+
+Two more hooks serve a robot whose UI is a pre-built SPA instead of the one-file console
+(mutually exclusive with `control_base_urls()`):
+
+- `static_ui()` — a `StaticUi(directory, api_query_param)` serving a built bundle at
+  `/{robot}/ui/` behind an operator session. `api_query_param` names the query parameter
+  the login redirect carries (`api=<origin>/{robot}/api`).
+- `http_api()` — an `HttpApi(base_url, routes)` allowlisting the calls the gateway relays
+  to the robot's own server at `/{robot}/api/*` and `/{robot}/api/ws/*`.
 
 ## Key Technologies
 
@@ -234,6 +249,13 @@ Serving:
   60–604800) and `R2_ENDPOINT` (default
   `https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com`, overridable for tests and local
   fakes).
+- **LeLab** (`lelab_so101`): `LELAB_URL` (default `http://127.0.0.1:8001`, the LeLab
+  backend — its own launcher is hard-wired to `:8000`, which clashes with the gateway, so
+  start it with `uvicorn lelab.server:app --host 127.0.0.1 --port 8001`), `LELAB_UI_DIR`
+  (default `src/plugins/lelab_so101/ui_dist`, the output of `scripts/build_lelab_ui.sh`),
+  and `UI_SESSION_HOURS` (default `8`, range 1–72, the operator-session cookie lifetime).
+  LeLab is never bound beyond loopback — the gateway's relay is its only reachable front
+  door.
 - Task auctions live in `yakrobot-marketplace`. Card-paid teleop is gated here, against
   the operator's own Stripe account (below).
 - **Teleop admission is always gated one of two ways — paid or free — never neither.**
@@ -333,3 +355,23 @@ RPC, no provider, no private key, so it does not violate the rule above.
   mid-drive is routine, not an incident — never let it surface as a traceback.
 - `console.html` is deliberately one self-contained file: inline CSS and JS, no build
   step, no asset requests. Over a long link, extra round trips cost more than bytes.
+
+### Working on plugin UIs
+
+- **Operator-only.** A served UI's `index.html` shell and every SPA sub-route require the
+  `yk_ui` session cookie; only the bundle's static assets are public. There is no
+  unauthenticated page that can call the relay.
+- **Allowlist, not a proxy.** The relay forwards only the calls the plugin's `http_api()`
+  declares; anything unmatched is `403 "not available through the gateway"`. Never widen
+  `ROUTES` to "everything".
+- **A stop is never refused.** After admission, `stop`-kind routes skip the reservation
+  check — a gateway that blocks a stop is worse than one that forwards it. Safety state
+  stays on the robot.
+- **LeLab is never bound beyond loopback.** The backend listens on `127.0.0.1:8001`; the
+  gateway's relay is its only reachable front door, so binding it wider would expose it
+  without the session + allowlist.
+- **Route list** (all registered in `register_http_relay`, before `register_console` and
+  the mounts): `GET /{robot}/ui/`, `POST /{robot}/ui/login`, `POST /{robot}/ui/logout`,
+  `GET /{robot}/ui/{path}`, `GET|HEAD|POST /{robot}/api/{path}`, and
+  `WS /{robot}/api/ws/{path}`. The bare `GET /{robot}/ui` 307-redirects to the trailing
+  slash, handled by `register_console`.
