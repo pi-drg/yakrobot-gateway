@@ -1838,3 +1838,20 @@ def test_stalled_writer_never_delays_relay(tmp_path, monkeypatch):
         return captured[0].dropped
 
     assert asyncio.run(run()) > 0
+
+
+def test_index_reports_recording_flag():
+    """recording:true only for a recordable robot with recording on, false otherwise."""
+    from starlette.testclient import TestClient
+
+    _clear_auth_env()
+    os.environ["FAKEROBOT_PICAR_URL"] = f"http://127.0.0.1:{SIM_PORT}"
+    os.environ["RECORDING_ENABLED"] = "1"
+    from core.server import create_gateway
+    from yakrobot_cli.commands import _load_plugins
+
+    app = create_gateway(_load_plugins(["fakerobot_picar", "fakerobot"]))
+    with TestClient(app) as client:
+        index = client.get("/").json()
+    assert index["robots"]["fakerobot_picar"]["recording"] is True
+    assert index["robots"]["fakerobot"]["recording"] is False

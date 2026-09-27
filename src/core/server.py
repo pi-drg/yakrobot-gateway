@@ -305,6 +305,14 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                         **({"ui_endpoint": f"/{name}/ui"} if plugin.control_base_urls() else {}),
                         "tools": plugin.tool_names(),
                         "reservation": registry.status(name),
+                        # Recording disclosure (§0.7): true only when recording is on
+                        # (with no disabling reason, e.g. VIDEO_ENABLED=0) and this
+                        # robot has opted in via dataset_features().
+                        "recording": (
+                            recording_cfg.enabled
+                            and recording_cfg.disabled_reason is None
+                            and plugin.dataset_features() is not None
+                        ),
                         # True/False once observed; null for a robot with no control
                         # server at all (never probed, and never will be).
                         "online": (

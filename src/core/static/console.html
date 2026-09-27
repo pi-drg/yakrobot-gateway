@@ -290,6 +290,10 @@
   }
   .tag.moving { background: var(--primary-light-bg); color: var(--primary); }
   .tag.blocked { background: var(--accent-bg); color: var(--accent); }
+  /* Persistent disclosure, not a command-state badge: shown whenever the gateway
+     reports recording is on for this robot, so a driver knows the session may
+     become a dataset before they start (design §2.5). */
+  .tag.recording { background: var(--accent-bg); color: var(--accent); }
 
   /* ---------- help ---------- */
   dialog {
@@ -444,6 +448,7 @@
   <span class="lease-countdown num" id="leaseCountdown" hidden></span>
   <a class="tx-link" id="txLink" hidden><span id="txLinkAnchor"></span></a>
   <button class="release" id="releaseBtn" type="button" hidden>Release lease</button>
+  <span class="tag recording" id="recordingTag" hidden>&#9679; Recording: this session may be published as a dataset</span>
   <button class="stop" id="stopBtn" type="button">Stop <kbd>SPACE</kbd></button>
 </header>
 
@@ -632,7 +637,8 @@
                     "speedVal","maxDuty","helpBtn","help","helpClose","keys","vx","vy","om",
                     "tag","vyWrap","videoBtn","camoff","pad","padStop","padCentre","padBtn",
                     "reserveBanner","leaseCountdown","paywall","paywallHeading","paywallReason",
-                    "paywallPrice","paywallLink","paywallCardLink","txLink","txLinkAnchor","releaseBtn"]) els[id] = $(id);
+                    "paywallPrice","paywallLink","paywallCardLink","txLink","txLinkAnchor","releaseBtn",
+                    "recordingTag"]) els[id] = $(id);
 
   let cfg = { maxDuty: 1400, deadmanMs: 700, holonomic: true };
   let control = null, degraded = false, isController = true;
@@ -815,7 +821,11 @@
       setDegraded(true, `${outstanding} pings unanswered`);
     }
     outstanding++;
-    control.send(JSON.stringify({ type: "ping", t: Date.now() }));
+    // The console's own last measured round trip rides along so the recorder can
+    // tell the whole browser↔robot hop apart from the gateway↔robot hop (§0.5).
+    const ping = { type: "ping", t: Date.now() };
+    if (typeof lastRtt === "number") ping.rtt_ms = lastRtt;
+    control.send(JSON.stringify(ping));
   }, PING_MS);
 
   function trimTape() { while (rtts.length > TAPE_N) rtts.shift(); }
@@ -1125,6 +1135,14 @@
     els.reserveBanner.hidden = false;
   }
 
+  // Persistent disclosure, read off the same index tick already fetches every 10s.
+  // Information only: it never changes what the sockets do, and it is shown before
+  // any payment or drive so nobody finds out after the fact (design §2.5).
+  function paintRecording(index) {
+    const recording = index?.robots?.[robotName]?.recording === true;
+    els.recordingTag.hidden = !recording;
+  }
+
   async function fetchIndex() {
     if (!robotName) return null;   // served directly by the robot: no gateway index
     try {
@@ -1146,6 +1164,7 @@
       if (index.stripe) stripe = index.stripe;
       if (index.teleop) teleop = index.teleop;
       paintReservationBanner(index.robots?.[robotName]?.reservation);
+      paintRecording(index);
       if (paywalled) showPaywall(els.paywallReason.hidden ? null : els.paywallReason.textContent);
     });
   }
@@ -1158,6 +1177,7 @@
       if (index.stripe) stripe = index.stripe;
       if (index.teleop) teleop = index.teleop;
       paintReservationBanner(index.robots?.[robotName]?.reservation);
+      paintRecording(index);
     }
 
     // Gated when the index confirms either paid or free reservations are on and
