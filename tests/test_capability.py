@@ -17,7 +17,7 @@ if str(SRC) not in sys.path:
 
 from capability_helper import canonical, mint  # noqa: E402
 
-from core.capability import CapabilityError, normalize_host, verify  # noqa: E402
+from core.capability import CapabilityError, normalize_host, verify, verify_dataset  # noqa: E402
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "capability-v1.json").read_text())
 ISSUER = FIXTURE["address"]
@@ -102,3 +102,59 @@ def test_normalize_host_examples():
     assert normalize_host("http://h:80") == "h"
     assert normalize_host("wss://127.0.0.1:8192/a/ws/control?x=1") == "127.0.0.1:8192"
     assert normalize_host("h.") == "h"
+
+
+# --- v2 dataset capability (§0.10) --------------------------------------------
+
+DATASET_FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "capability-dataset-v2.json").read_text()
+)
+DATASET_ISSUER = DATASET_FIXTURE["address"]
+DATASET_NOW = DATASET_FIXTURE["claims"]["iat"] + 100
+REDEEM_DAYS = 30  # fixture exp - iat is exactly 30 days
+
+
+def test_dataset_fixture_verifies():
+    claims = verify_dataset(
+        DATASET_FIXTURE["token"], DATASET_ISSUER, redeem_days=REDEEM_DAYS, now=DATASET_NOW
+    )
+    assert claims.kind == "dataset"
+    assert claims.dataset == "picar_red_box_v1"
+    assert claims.recipient == "wallet:0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+
+
+def test_v1_verify_rejects_v2():
+    with pytest.raises(CapabilityError):
+        verify(
+            DATASET_FIXTURE["token"], DATASET_ISSUER,
+            lease_minutes=LEASE_MINUTES, now=DATASET_NOW,
+        )
+
+
+def test_verify_dataset_rejects_v1():
+    with pytest.raises(CapabilityError):
+        verify_dataset(FIXTURE["token"], ISSUER, redeem_days=REDEEM_DAYS, now=NOW_IN_WINDOW)
+
+
+def test_verify_dataset_rejects_extra_claim():
+    claims = {**DATASET_FIXTURE["claims"], "extra": "x"}
+    token = mint(claims, DATASET_FIXTURE["private_key"])
+    with pytest.raises(CapabilityError):
+        verify_dataset(token, DATASET_ISSUER, redeem_days=REDEEM_DAYS, now=DATASET_NOW)
+
+
+def test_verify_dataset_rejects_bad_recipient():
+    claims = {**DATASET_FIXTURE["claims"], "recipient": "hf:not a user"}
+    token = mint(claims, DATASET_FIXTURE["private_key"])
+    with pytest.raises(CapabilityError):
+        verify_dataset(token, DATASET_ISSUER, redeem_days=REDEEM_DAYS, now=DATASET_NOW)
+
+
+def test_verify_dataset_duration_bound():
+    claims = {
+        **DATASET_FIXTURE["claims"],
+        "exp": DATASET_FIXTURE["claims"]["iat"] + 40 * 86400,  # 40 days > 30
+    }
+    token = mint(claims, DATASET_FIXTURE["private_key"])
+    with pytest.raises(CapabilityError):
+        verify_dataset(token, DATASET_ISSUER, redeem_days=REDEEM_DAYS, now=DATASET_NOW)

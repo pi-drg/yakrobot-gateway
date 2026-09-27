@@ -1,0 +1,19 @@
+{
+  "private_key": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+  "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "claims": {
+    "v": 2,
+    "kind": "dataset",
+    "gateway": "127.0.0.1:8192",
+    "robot": "fakerobot_picar",
+    "dataset": "picar_red_box_v1",
+    "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "recipient": "wallet:0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+    "sale": "00000000-0000-4000-8000-000000000002",
+    "payer": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+    "iat": 1757700000,
+    "exp": 1760292000
+  },
+  "canonical_payload": "{\"dataset\":\"picar_red_box_v1\",\"exp\":1760292000,\"gateway\":\"127.0.0.1:8192\",\"iat\":1757700000,\"kind\":\"dataset\",\"payer\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"recipient\":\"wallet:0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"rev\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"robot\":\"fakerobot_picar\",\"sale\":\"00000000-0000-4000-8000-000000000002\",\"v\":2}",
+  "token": "eyJkYXRhc2V0IjoicGljYXJfcmVkX2JveF92MSIsImV4cCI6MTc2MDI5MjAwMCwiZ2F0ZXdheSI6IjEyNy4wLjAuMTo4MTkyIiwiaWF0IjoxNzU3NzAwMDAwLCJraW5kIjoiZGF0YXNldCIsInBheWVyIjoiMHg3MDk5Nzk3MGM1MTgxMmRjM2EwMTBjN2QwMWI1MGUwZDE3ZGM3OWM4IiwicmVjaXBpZW50Ijoid2FsbGV0OjB4NzA5OTc5NzBjNTE4MTJkYzNhMDEwYzdkMDFiNTBlMGQxN2RjNzljOCIsInJldiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJyb2JvdCI6ImZha2Vyb2JvdF9waWNhciIsInNhbGUiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDIiLCJ2IjoyfQ.BnWu4k824nuNDQ9Vl9yV8-W9EXA0-x05cFUtqzCoWU93Rk5xQAchX_W52bzvVcOjEOiPsI-fUIyY2k_pA9CdUhw"
+}
