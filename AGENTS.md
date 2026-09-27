@@ -127,6 +127,9 @@ core changes:
 - **pyngrok** — tunnel management
 - **yakrobot-descriptor** (`export` extra) — shared JSON `RobotDescriptor` contract, the
   only thing that crosses to the on-chain side
+- **lerobot** (`dataset-export` extra) — converts staged teleop sessions to a
+  LeRobotDataset v3, fully offline; imports only inside
+  `src/yakrobot_cli/dataset_export.py`, never in the serving gateway
 
 ## Common Commands
 
@@ -169,6 +172,12 @@ uv run pytest -q
 uv sync --extra export
 uv run yakrobot-py export tumbller     # --public-domain defaults from $NGROK_DOMAIN / $CLOUDFLARE_DOMAIN
 # writes robot-descriptors/tumbller.json (gitignored artifact; source of truth = metadata())
+
+# Teleop datasets — list, export and validate staged recording sessions (offline)
+uv run yakrobot-py dataset sessions fakerobot_picar        # list staged sessions
+uv sync --extra dataset-export                            # lerobot, offline (torch stays out of serve)
+uv run yakrobot-py dataset export fakerobot_picar --repo-id myname/dataset --task drive
+uv run yakrobot-py dataset validate ./out/myname/dataset
 
 # A running gateway serves the same document live, which is what the browser
 # registration page reads (it needs the `export` extra too, else 501):
@@ -296,6 +305,11 @@ RPC, no provider, no private key, so it does not violate the rule above.
 - No framework code changes should be needed to add a new robot
 - This repo holds **no chain code**: on-chain concerns belong in `yakrobot-identity`.
   The `stripe` extra is plain HTTPS to Stripe — no chain, no RPC, no key material.
+- **The serving gateway never imports `lerobot`, `torch` or `huggingface_hub` at module
+  level.** `lerobot` lives only in the `dataset-export` extra, imported inside
+  `src/yakrobot_cli/dataset_export.py`; `huggingface_hub` imports go inside functions
+  behind the `datasets-hf` extra. This keeps torch/pyarrow/av out of the serve
+  environment — dataset export runs offline as a CLI command, not as part of serving.
 - **Leave `fleet_provider` and `fleet_domain` empty in a plugin's `metadata()`.** A gateway
   cannot verify whose fleet it belongs to, so filling them in would put an unverified claim
   into the exported descriptor and from there on-chain. Whoever registers the robot supplies
