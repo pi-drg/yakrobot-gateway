@@ -46,24 +46,27 @@ def paid_session(
     status: str = "complete",
     payment_status: str = "paid",
     gateway: str = "127.0.0.1:8192",
+    metadata: dict | None = None,
+    amount_total: int | None = None,
 ) -> dict:
     """A realistic Checkout Session body, the shape the gateway's confirm reads.
 
-    ``created`` (the PaymentIntent's creation time, which the gateway anchors the lease
-    ``exp`` to) defaults to now. ``sid`` is the Checkout Session id, e.g. ``cs_test_1``.
-    ``gateway`` defaults to the test suite's gateway host (``GW_PORT``); sessions
-    created through ``POST`` carry whatever ``metadata[gateway]`` the gateway sent.
+    ``created`` (the PaymentIntent's creation time) defaults to now. ``sid`` is the
+    Checkout Session id. ``gateway``/``metadata`` describe what the POST carried (dataset
+    sales add ``dataset``/``rev``/``recipient`` to the metadata); ``amount_total``
+    overrides ``cents`` when a caller wants a specific non-default amount.
     """
+    metadata = dict(metadata) if metadata is not None else {"robot": robot, "gateway": gateway}
     return {
         "id": sid,
         "object": "checkout.session",
         "mode": "payment",
         "status": status,
         "payment_status": payment_status,
-        "amount_total": cents,
+        "amount_total": amount_total if amount_total is not None else cents,
         "currency": currency,
         "livemode": livemode,
-        "metadata": {"robot": robot, "gateway": gateway},
+        "metadata": metadata,
         "payment_intent": {
             "id": f"pi_{sid}",
             "object": "payment_intent",
@@ -107,11 +110,19 @@ def create_fake_stripe(state: StripeState) -> FastAPI:
         state.created_forms.append(form)
 
         sid = state.next_id
-        robot = form.get("metadata[robot]", "")
+        metadata = {
+            k[len("metadata["):-1]: v
+            for k, v in form.items()
+            if k.startswith("metadata[") and k.endswith("]")
+        }
+        robot = metadata.get("robot", "")
+        amount_total = int(form.get("line_items[0][price_data][unit_amount]", "0") or 0)
+        currency = form.get("line_items[0][price_data][currency]", "usd")
         # "Paying" is just following the redirect — record a paid session now so the
         # confirm GET succeeds. Tests override this for the unpaid/mismatch cases.
         state.sessions[sid] = paid_session(
-            sid, robot, gateway=form.get("metadata[gateway]", "")
+            sid, robot, gateway=metadata.get("gateway", ""),
+            metadata=metadata or None, amount_total=amount_total, currency=currency,
         )
 
         success_url = form.get("success_url", "")
