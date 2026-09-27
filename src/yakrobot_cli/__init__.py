@@ -19,6 +19,7 @@ import typer
 from dotenv import load_dotenv
 
 from . import commands
+from .dataset_cmds import dataset_app
 
 # Load .env so env-var defaults below (e.g. NGROK_DOMAIN) resolve from the repo's .env,
 # matching how core.server loads it for the serving path.
@@ -29,6 +30,8 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=True,
 )
+
+app.add_typer(dataset_app, name="dataset")
 
 
 class TunnelProvider(str, Enum):

@@ -61,11 +61,10 @@ def _median(values: list[float]) -> float | None:
     return statistics.median(values) if values else None
 
 
-def load_session(path) -> LoadedSession:
-    """Read a staged session directory into the in-memory shape §0.5 step 1 wants."""
+def load_control(path) -> tuple[list[tuple[int, dict]], list[tuple[int, dict]]]:
+    """Read ``control.jsonl`` into ``(up, down)`` lists of ``(t, msg)``, skipping raw
+    (non-JSON-object) frames — those are not commands or telemetry."""
     path = Path(path)
-    meta = json.loads((path / "session.json").read_text())
-
     up: list[tuple[int, dict]] = []
     down: list[tuple[int, dict]] = []
     for line in (path / "control.jsonl").read_text().splitlines():
@@ -74,8 +73,22 @@ def load_session(path) -> LoadedSession:
         rec = json.loads(line)
         msg = rec.get("msg")
         if not isinstance(msg, dict):
-            continue  # a raw (non-JSON-object) frame is not a command/telemetry
+            continue
         (up if rec["dir"] == "up" else down).append((rec["t"], msg))
+    return up, down
+
+
+def latency_stats(up: list[tuple[int, dict]], down: list[tuple[int, dict]]) -> tuple[float | None, float | None]:
+    """``(rtt_lan_ms, rtt_browser_ms)`` for a session's control streams (§0.5 step 2)."""
+    return _rtt_lan(up, down), _rtt_browser(up)
+
+
+def load_session(path) -> LoadedSession:
+    """Read a staged session directory into the in-memory shape §0.5 step 1 wants."""
+    path = Path(path)
+    meta = json.loads((path / "session.json").read_text())
+
+    up, down = load_control(path)
 
     video: list[tuple[int, bytes]] = []
     video_lines = [json.loads(l) for l in (path / "video.jsonl").read_text().splitlines() if l.strip()]
