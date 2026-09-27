@@ -102,6 +102,11 @@ _CLEARED_ENV_VARS = (
     "STRIPE_GATE_ENABLED", "STRIPE_SECRET_KEY", "STRIPE_PRICE_CENTS",
     "STRIPE_CURRENCY", "STRIPE_API_BASE",
     "STRIPE_AUTOMATIC_TAX", "STRIPE_TAX_CODE",
+    "RECORDING_ENABLED", "RECORDINGS_DIR", "RECORDINGS_MAX_GB",
+    "RECORDING_QUEUE_FRAMES", "VIDEO_ENABLED",
+    "DATASET_REDEEM_DAYS", "HF_TOKEN",
+    "R2_ACCOUNT_ID", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+    "R2_URL_TTL_S", "R2_ENDPOINT",
 )
 
 
@@ -517,22 +522,20 @@ def test_video_can_be_disabled_gateway_wide():
     async def run():
         from websockets.asyncio.client import connect
 
-        os.environ["VIDEO_ENABLED"] = "0"
-        try:
-            async with _Stack(env=_static_env()) as stack:
-                # 1008 must reach the browser intact — it is the signal the
-                # console keys off to stop retrying a refusal that will not
-                # change until the gateway is restarted. video_enabled() is checked
-                # before admission, so no token is needed to reach this refusal.
-                code, reason = await _refusal(stack.video)
-                assert code == 1008
-                assert "video disabled" in reason
+        # Passed through the _Stack env rather than set on os.environ directly, because
+        # _clear_auth_env() now clears VIDEO_ENABLED too (§0.1 is part of the cleared set).
+        async with _Stack(env=_static_env(VIDEO_ENABLED="0")) as stack:
+            # 1008 must reach the browser intact — it is the signal the
+            # console keys off to stop retrying a refusal that will not
+            # change until the gateway is restarted. video_enabled() is checked
+            # before admission, so no token is needed to reach this refusal.
+            code, reason = await _refusal(stack.video)
+            assert code == 1008
+            assert reason is not None and "video disabled" in reason
 
-                # Control is untouched — the car stays drivable, just blind.
-                async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
-                    assert (await _recv_json(ws))["type"] == "hello"
-        finally:
-            os.environ.pop("VIDEO_ENABLED", None)
+            # Control is untouched — the car stays drivable, just blind.
+            async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
 
     asyncio.run(run())
 

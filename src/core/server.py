@@ -210,6 +210,21 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
             ) from None
     free_teleop_cfg = load_free_teleop_config(payments_cfg, stripe_cfg)
 
+    # Recording and dataset delivery (execution plan §0.1). Loaded right after the paid
+    # config so a bad value fails before anything is served, the same as PaymentsConfig.
+    from core.datasets_config import (
+        load_recording_config,
+        load_redeem_days,
+        load_r2_config,
+    )
+    recording_cfg = load_recording_config()
+    redeem_days = load_redeem_days()
+    r2_cfg = load_r2_config()
+    if recording_cfg.disabled_reason is not None:
+        # Once, at startup: a gateway with VIDEO_ENABLED=0 has recording off for a
+        # reason, and that reason should be visible above uvicorn's info-level floor.
+        logger.warning("recording disabled: %s", recording_cfg.disabled_reason)
+
     registry = ReservationRegistry()  # shared across every robot server + the index
     reachability = Reachability()  # shared between the proxy's real connects and the probe
 
@@ -241,6 +256,9 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     app.state.payments = payments_cfg
     app.state.stripe = stripe_cfg
     app.state.free_teleop = free_teleop_cfg
+    app.state.recording = recording_cfg
+    app.state.r2 = r2_cfg
+    app.state.redeem_days = redeem_days
     app.state.reachability = reachability
 
     # Everything the gateway serves under a robot's own prefix: the realtime socket
@@ -276,6 +294,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                 "payments": index_summary(payments_cfg),
                 "stripe": stripe_summary(stripe_cfg),
                 "teleop": teleop_summary(payments_cfg, free_teleop_cfg, stripe_cfg),
+                "datasets": {"redeem_days": redeem_days},
                 "robots": {
                     name: {
                         "mcp_endpoint": f"/{name}/mcp",
