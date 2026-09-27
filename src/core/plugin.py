@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
+
 from fastmcp import FastMCP
 
 
@@ -66,6 +68,36 @@ class DatasetFeatures:
     action_update: Callable[[dict], dict | None]
     state_update: Callable[[dict], dict | None]
     is_stop: Callable[[dict], bool]
+
+
+@dataclass(frozen=True)
+class StaticUi:
+    """A served, pre-built SPA for a robot (execution plan §0.15).
+
+    Returned by ``RobotPlugin.static_ui()`` for robots whose operator UI is a built
+    frontend bundle served from disk rather than the gateway's one-file console. The
+    two are mutually exclusive with ``control_base_urls()``.
+    """
+
+    directory: Path                 # must contain index.html to be served
+    api_query_param: str | None      # e.g. "api": login redirect appends ?api=<origin>/<robot>/api
+
+
+@dataclass(frozen=True)
+class ApiRoute:
+    """One allowlisted upstream call the gateway relays to a robot's own server (§0.15)."""
+
+    method: str                     # "GET" | "POST" | "WS"
+    pattern: str                    # re.fullmatch against the path after "/api/", no leading slash
+    kind: str                       # "read" | "config" | "control" | "stop"
+
+
+@dataclass(frozen=True)
+class HttpApi:
+    """An allowlisted HTTP/WS API the gateway relays to the robot's own server (§0.15)."""
+
+    base_url: str
+    routes: tuple[ApiRoute, ...]
 
 
 class RobotPlugin(ABC):
@@ -137,6 +169,26 @@ class RobotPlugin(ABC):
         front camera. ``None`` (the default) means the robot is not recordable: the
         gateway records nothing for it, and the index reports ``recording: false``. This
         is the same opt-in pattern as ``control_base_urls()``.
+        """
+        return None
+
+    def static_ui(self) -> StaticUi | None:
+        """A served, pre-built operator UI (execution plan §0.15).
+
+        Implemented by plugins whose operator frontend is a built SPA on disk (LeLab),
+        served at ``/{robot}/ui/…`` behind an operator session. ``None`` (the default)
+        means the robot uses the gateway's one-file console instead. Mutually exclusive
+        with ``control_base_urls()``: a robot has either realtime sockets to proxy or a
+        served UI, never both.
+        """
+        return None
+
+    def http_api(self) -> HttpApi | None:
+        """An allowlisted HTTP/WS API relayed to the robot's own server (§0.15).
+
+        Implemented by plugins that front an on-robot server whose calls the gateway
+        relays behind the operator session — ``/{robot}/api/{path}`` (HTTP) and
+        ``/{robot}/api/ws/{path}`` (WebSocket). ``None`` (the default) means no relay.
         """
         return None
 

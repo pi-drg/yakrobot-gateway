@@ -230,6 +230,24 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
 
     listings = DatasetListings(os.getenv("DATASETS_FILE"), set(plugins))
 
+    # §0.15 startup checks: a served UI and a realtime socket proxy are mutually
+    # exclusive, and a UI whose bundle hasn't been built is served as a warning +
+    # "UI not built" page rather than failing startup.
+    static_ui_robots: set[str] = set()
+    for name, plugin in plugins.items():
+        static_ui = plugin.static_ui()
+        if plugin.control_base_urls() and static_ui is not None:
+            raise ValueError(f"{name}: declare control_base_urls() or static_ui(), not both")
+        if static_ui is not None:
+            static_ui_robots.add(name)
+            if not (static_ui.directory / "index.html").exists():
+                logger.warning(
+                    "static UI for %s not built: %s has no index.html; "
+                    "serving the 'UI not built' page",
+                    name,
+                    static_ui.directory,
+                )
+
     registry = ReservationRegistry()  # shared across every robot server + the index
     reachability = Reachability()  # shared between the proxy's real connects and the probe
 
@@ -277,7 +295,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     from core.ws_proxy import register_ws_proxy
 
     register_ws_proxy(app, plugins, registry, reachability, payments_cfg, free_teleop_cfg, stripe_cfg, recording_cfg)
-    register_console(app, plugins)
+    register_console(app, plugins, static_ui_robots)
     register_descriptor_route(app, plugins)
 
     from core.datasets_routes import register_dataset_routes
@@ -309,10 +327,17 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                     name: {
                         "mcp_endpoint": f"/{name}/mcp",
                         "descriptor_endpoint": f"/{name}/descriptor",
-                        # Present only for robots with a realtime control server —
-                        # its absence is how a caller knows this one cannot be driven
-                        # from a browser.
-                        **({"ui_endpoint": f"/{name}/ui"} if plugin.control_base_urls() else {}),
+                        # Present only for robots with a realtime control server or a
+                        # served UI — its absence is how a caller knows this one cannot
+                        # be driven from a browser. §0.15: console robots advertise the
+                        # bare path, static-UI robots the trailing-slash path.
+                        **(
+                            {"ui_endpoint": f"/{name}/ui/"}
+                            if name in static_ui_robots
+                            else {"ui_endpoint": f"/{name}/ui"}
+                            if plugin.control_base_urls()
+                            else {}
+                        ),
                         "tools": plugin.tool_names(),
                         "reservation": registry.status(name),
                         # Recording disclosure (§0.7): true only when recording is on

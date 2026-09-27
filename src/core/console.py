@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from core.plugin import RobotPlugin
 
@@ -27,22 +27,37 @@ logger = logging.getLogger(__name__)
 CONSOLE_HTML = Path(__file__).resolve().parent / "static" / "console.html"
 
 
-def register_console(app: FastAPI, plugins: dict[str, RobotPlugin]) -> None:
+def register_console(
+    app: FastAPI, plugins: dict[str, RobotPlugin], static_ui_robots: set[str] | None = None
+) -> None:
     """Add ``GET /{robot}/ui``.
 
     **Must be called before the per-robot MCP apps are mounted**, for the same
     reason as the WebSocket proxy: ``app.mount("/{name}")`` claims everything
     beneath its prefix, and a route registered afterwards never sees a request.
+
+    For a static-UI robot (§0.15) the bare ``/{robot}/ui`` path 307-redirects to
+    ``/{robot}/ui/``, where ``http_relay`` serves the bundle. Console robots keep the
+    one-file console.
     """
-    drivable = {name for name, p in plugins.items() if p.control_base_urls()}
-    if not drivable:
-        logger.info("console: no plugin exposes a control server; /ui not served")
+    static_ui_robots = static_ui_robots or set()
+    drivable = {
+        name for name, p in plugins.items() if p.control_base_urls() and name not in static_ui_robots
+    }
+    if not drivable and not static_ui_robots:
+        logger.info("console: no plugin exposes a control server or UI; /ui not served")
         return
     for name in sorted(drivable):
         logger.info("console: /%s/ui", name)
+    for name in sorted(static_ui_robots):
+        logger.info("console: /%s/ui → static UI", name)
 
     @app.get("/{robot}/ui")
     async def robot_console(robot: str):
+        if robot in static_ui_robots:
+            # The served bundle lives at the trailing-slash path; the bare path is the
+            # entry the index advertises, so redirect it there.
+            return RedirectResponse(url=f"/{robot}/ui/", status_code=307)
         if robot not in drivable:
             # Either an unknown robot or one with no realtime socket to drive
             # (the Tello speaks UDP). Refuse rather than serve a console whose
