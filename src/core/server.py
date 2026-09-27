@@ -280,6 +280,10 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     register_console(app, plugins)
     register_descriptor_route(app, plugins)
 
+    from core.datasets_routes import register_dataset_routes
+
+    register_dataset_routes(app, plugins, listings, r2_cfg, payments_cfg, stripe_cfg, redeem_days)
+
     for name, mcp_app in mcp_apps.items():
         app.mount(f"/{name}", mcp_app)
 
