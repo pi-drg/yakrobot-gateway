@@ -6,6 +6,8 @@ package or its dependencies are needed.
 """
 
 import os
+import socket
+import time
 from pathlib import Path
 
 import pytest
@@ -242,3 +244,265 @@ def test_ui_not_built_page(tmp_path):
         res = client.get("/lelab/ui/")
     assert res.status_code == 503
     assert "UI not built" in res.text
+
+
+# -- §0.17 relay (step 7.4) ----------------------------------------------------
+
+
+# Mirrors plugins/lelab_so101's ROUTES (§0.18): first match wins, anything unmatched
+# is refused. Refused by omission: every DELETE/PUT, POST to system/…, hf-auth/login,
+# jobs/training, jobs/import and delete-dataset.
+_RELAY_ROUTES = (
+    ApiRoute("POST", r"stop-teleoperation|stop-recording|recording-exit-early|stop-calibration|stop-inference|jobs/[^/]+/stop", "stop"),
+    ApiRoute("POST", r"move-arm|start-recording|recording-rerecord-episode|start-calibration|complete-calibration-step|start-inference|start-port-detection|detect-port-after-disconnect", "control"),
+    ApiRoute("POST", r"save-robot-port|save-robot-config|upload-dataset|dataset-info|robots/[^/]+", "config"),
+    ApiRoute("WS", r"ws/joint-data", "read"),
+    ApiRoute("GET", r".*", "read"),
+)
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def lelab_server():
+    """Run the fake LeLab backend on a loopback port in a background thread."""
+    import threading
+
+    import uvicorn
+    from tools.fake_lelab import LeLabState, create_fake_lelab
+
+    state = LeLabState()
+    app = create_fake_lelab(state)
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while not server.started and time.time() < deadline:
+        time.sleep(0.02)
+    yield state, f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
+def _relay_app(tmp_path: Path, base_url: str, *, tokens="op=tok"):
+    from starlette.testclient import TestClient
+
+    ui_dir = tmp_path / "ui_dist"
+    ui_dir.mkdir(exist_ok=True)
+    (ui_dir / "index.html").write_text("<!doctype html><title>lelab</title>")
+    plugin = _TestPlugin(
+        "lelab",
+        static_ui=StaticUi(directory=ui_dir, api_query_param="api"),
+        http_api=HttpApi(base_url=base_url, routes=_RELAY_ROUTES),
+    )
+    os.environ["MCP_TOKENS"] = tokens
+    return TestClient(create_gateway({"lelab": plugin}), base_url="http://127.0.0.1")
+
+
+def _login(client) -> None:
+    client.post("/lelab/ui/login", data={"token": "tok"})
+
+
+def _saw(state, method: str, path: str) -> bool:
+    return any(m == method and p == path for m, p, _b in state.calls)
+
+
+def test_relay_requires_session(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        res = client.get("/lelab/api/teleoperation-status")
+    assert res.status_code == 401
+    assert res.json()["detail"] == "operator login required"
+
+
+def test_get_status_relayed(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        res = client.get("/lelab/api/teleoperation-status")
+    assert res.status_code == 200
+    assert _saw(state, "GET", "/teleoperation-status")
+
+
+def test_unlisted_routes_refused(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        assert client.post("/lelab/api/system/update", json={}).status_code == 403
+        assert client.post("/lelab/api/hf-auth/login", json={}).status_code == 403
+        assert client.delete("/lelab/api/jobs/x").status_code in (403, 404, 405)
+    assert not _saw(state, "POST", "/system/update")
+    assert not _saw(state, "POST", "/hf-auth/login")
+    assert not any(m == "DELETE" for m, _p, _b in state.calls)
+
+
+def test_cross_origin_post_refused(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        res = client.post(
+            "/lelab/api/move-arm",
+            json={"joints": []},
+            headers={"origin": "http://evil.example"},
+        )
+    assert res.status_code == 403
+    assert res.json()["detail"] == "cross-origin request refused"
+    assert not _saw(state, "POST", "/move-arm")
+
+
+def test_control_route_reserves_for_operator(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        res = client.post("/lelab/api/move-arm", json={"joints": []})
+        assert res.status_code == 200
+        index = client.get("/").json()
+    assert index["robots"]["lelab"]["reservation"]["holder"] == "op"
+
+
+def test_control_route_409_when_agent_holds_robot(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url, tokens="op=tok,other=tok2") as client:
+        # "other" reserves via a control call.
+        client.post("/lelab/ui/login", data={"token": "tok2"})
+        assert client.post("/lelab/api/move-arm", json={}).status_code == 200
+        # "op" is refused.
+        client.post("/lelab/ui/login", data={"token": "tok"})
+        res = client.post("/lelab/api/move-arm", json={})
+    assert res.status_code == 409
+    assert "held by other" in res.json()["detail"]
+
+
+def test_stop_route_passes_when_robot_held_by_other(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url, tokens="op=tok,other=tok2") as client:
+        client.post("/lelab/ui/login", data={"token": "tok2"})
+        assert client.post("/lelab/api/move-arm", json={}).status_code == 200
+        client.post("/lelab/ui/login", data={"token": "tok"})
+        res = client.post("/lelab/api/stop-recording", json={})
+    assert res.status_code == 200
+    assert _saw(state, "POST", "/stop-recording")
+
+
+def test_read_renews_only_own_reservation(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url, tokens="op=tok,other=tok2") as client:
+        client.post("/lelab/ui/login", data={"token": "tok"})
+        assert client.post("/lelab/api/move-arm", json={}).status_code == 200
+        # Own read renews; another client's read is still served but never acquires.
+        assert client.get("/lelab/api/teleoperation-status").status_code == 200
+        client.post("/lelab/ui/login", data={"token": "tok2"})
+        assert client.get("/lelab/api/teleoperation-status").status_code == 200
+        index = client.get("/").json()
+    assert index["robots"]["lelab"]["reservation"]["holder"] == "op"
+
+
+def test_camera_feed_streams_and_closes_on_disconnect(tmp_path, lelab_server):
+    import threading
+
+    import httpx
+    import uvicorn
+
+    state, base_url = lelab_server
+    ui_dir = tmp_path / "ui_dist"
+    ui_dir.mkdir(exist_ok=True)
+    (ui_dir / "index.html").write_text("<!doctype html><title>lelab</title>")
+    plugin = _TestPlugin(
+        "lelab",
+        static_ui=StaticUi(directory=ui_dir, api_query_param="api"),
+        http_api=HttpApi(base_url=base_url, routes=_RELAY_ROUTES),
+    )
+    os.environ["MCP_TOKENS"] = "op=tok"
+    app = create_gateway({"lelab": plugin})
+    # Run the gateway as a real server so a client disconnect reaches uvicorn and
+    # cancels the relay's streaming response (an in-process client cannot tear down an
+    # endless MJPEG stream cleanly).
+    port = _free_port()
+    gw = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=gw.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while not gw.started and time.time() < deadline:
+        time.sleep(0.02)
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=5.0) as hc:
+            hc.post("/lelab/ui/login", data={"token": "tok"})
+            with hc.stream("GET", "/lelab/api/camera-feed/front") as r:
+                assert r.status_code == 200
+                it = r.iter_raw()
+                for _ in range(3):
+                    next(it)
+        # The client (and its stream) closed — the gateway must now close the upstream.
+    finally:
+        gw.should_exit = True
+        thread.join(timeout=5)
+    deadline = time.time() + 3
+    while time.time() < deadline and not _saw(state, "DISCONNECT", "/camera-feed/front"):
+        time.sleep(0.05)
+    assert _saw(state, "DISCONNECT", "/camera-feed/front")
+
+
+def test_range_request_returns_206(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        res = client.get("/lelab/api/dataset-video", headers={"range": "bytes=0-99"})
+    assert res.status_code == 206
+    assert "content-range" in {k.lower() for k in res.headers}
+
+
+def test_request_body_limit_413(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        big = "x" * (1024 * 1024 + 1)
+        res = client.post("/lelab/api/start-recording", content=big)
+    assert res.status_code == 413
+
+
+def test_upstream_down_is_502(tmp_path):
+    with _relay_app(tmp_path, "http://127.0.0.1:1") as client:
+        _login(client)
+        res = client.get("/lelab/api/teleoperation-status")
+    assert res.status_code == 502
+    assert "unreachable" in res.json()["detail"]
+
+
+def test_ws_joint_data_relayed(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        cookie = client.cookies.get("yk_ui")
+        with client.websocket_connect(
+            "/lelab/api/ws/joint-data", headers={"cookie": f"yk_ui={cookie}"}
+        ) as ws:
+            msg = ws.receive_json()
+            assert msg["type"] == "joint_update"
+            ws.send_text("ping")
+
+
+def test_ws_refused_without_session(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        with client.websocket_connect("/lelab/api/ws/joint-data") as ws:
+            # The relay accepts then closes with 1008.
+            with pytest.raises(Exception):
+                ws.receive_json()
+
+
+def test_ws_unlisted_path_refused(tmp_path, lelab_server):
+    state, base_url = lelab_server
+    with _relay_app(tmp_path, base_url) as client:
+        _login(client)
+        cookie = client.cookies.get("yk_ui")
+        with client.websocket_connect(
+            "/lelab/api/ws/other", headers={"cookie": f"yk_ui={cookie}"}
+        ) as ws:
+            with pytest.raises(Exception):
+                ws.receive_json()
+    assert not _saw(state, "WS", "/ws/other")

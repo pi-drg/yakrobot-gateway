@@ -8,6 +8,7 @@ sub-route — require a session, because that is the page that then calls the re
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -15,16 +16,21 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from pathlib import Path
-from urllib.parse import quote
+from typing import Any
+from urllib.parse import quote, urlparse
 
+import websockets
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from starlette.requests import HTTPConnection
+from starlette.websockets import WebSocket
 
-from core.plugin import RobotPlugin, StaticUi
-from core.ws_proxy import _gateway_token_clients, _public_origin
+from core.plugin import ApiRoute, RobotPlugin, StaticUi
+from core.ws_proxy import _gateway_token_clients, _public_origin, _pump_to_browser, _pump_to_robot, _refuse
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +120,176 @@ def _not_built_page(robot: str) -> str:
         '<!doctype html><html><head><meta charset="utf-8"><title>UI not built</title></head>'
         f"<body><p>UI not built for {html.escape(robot)}: run scripts/build_lelab_ui.sh.</p></body></html>"
     )
+
+
+# -- §0.17 relay ----------------------------------------------------------------
+
+_MAX_BODY_BYTES = 1 * 1024 * 1024
+_ALLOWED_REQ_HEADERS = {"content-type", "accept", "range", "if-none-match", "if-modified-since"}
+_ALLOWED_RES_HEADERS = {
+    "content-type", "content-length", "content-range", "accept-ranges",
+    "cache-control", "etag", "last-modified", "content-disposition",
+}
+
+# One shared client per event loop, created lazily so the serve environment stays
+# httpx-free until a plugin actually declares an http_api() (httpx lives in the
+# `stripe`/`lelab` extras). Tracking the loop matters: starlette's TestClient opens a
+# fresh loop per test, and an AsyncClient is bound to the loop it was created on.
+_client: tuple[Any, Any] | None = None  # (loop, AsyncClient)
+
+
+def _get_client():
+    global _client
+    loop = asyncio.get_running_loop()
+    if _client is None or _client[0] is not loop:
+        import httpx
+
+        _client = (loop, httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=None, write=30, pool=5)))
+    return _client[1]
+
+
+class _RelayRefusal(Exception):
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def _admit(
+    conn: HTTPConnection,
+    robot: str,
+    path: str,
+    method: str,
+    plugins: dict[str, RobotPlugin],
+    registry,
+    *,
+    is_ws: bool,
+) -> tuple[str, ApiRoute]:
+    """Run §0.17's admission steps 1–5. Returns ``(client_id, route)`` or raises
+    ``_RelayRefusal``."""
+    http_api = plugins[robot].http_api() if robot in plugins else None
+    if http_api is None:
+        raise _RelayRefusal(404, "no api for this robot")
+
+    client_id = _verify_cookie(robot, conn.cookies.get(UI_COOKIE, ""), int(time.time()))
+    if client_id is None:
+        raise _RelayRefusal(401, "operator login required")
+
+    if method not in ("GET", "HEAD"):
+        origin = conn.headers.get("origin")
+        if origin and origin != _public_origin(conn):
+            raise _RelayRefusal(403, "cross-origin request refused")
+
+    lookup = "WS" if is_ws else ("GET" if method == "HEAD" else method)
+    route = next(
+        (r for r in http_api.routes if r.method == lookup and re.fullmatch(r.pattern, path)),
+        None,
+    )
+    if route is None:
+        raise _RelayRefusal(403, "not available through the gateway")
+
+    # Reservation — the holder is the session's client_id.
+    if route.kind == "control":
+        if not registry.reserve(robot, client_id):
+            holder = registry.status(robot).get("holder", "")
+            raise _RelayRefusal(409, f"robot is held by {holder}")
+    elif route.kind == "read":
+        if registry.status(robot).get("holder") == client_id:
+            registry.reserve(robot, client_id)  # renew, never acquire
+    # stop and config: no reservation.
+    return client_id, route
+
+
+async def _relay_http(
+    request: Request, robot: str, path: str, plugins: dict[str, RobotPlugin], registry
+) -> StreamingResponse | JSONResponse:
+    try:
+        _admit(request, robot, path, request.method, plugins, registry, is_ws=False)
+    except _RelayRefusal as r:
+        return JSONResponse({"detail": r.detail}, status_code=r.status)
+
+    import httpx
+
+    http_api = plugins[robot].http_api()
+    assert http_api is not None  # _admit passed
+    base_url = http_api.base_url.rstrip("/")
+    url = f"{base_url}/{path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+
+    headers = {
+        k: v for k, v in request.headers.items() if k.lower() in _ALLOWED_REQ_HEADERS
+    }
+    body = await request.body()
+    if len(body) > _MAX_BODY_BYTES:
+        return JSONResponse({"detail": "request body too large"}, status_code=413)
+
+    upstream_req = _get_client().build_request(request.method, url, headers=headers, content=body)
+    try:
+        upstream_res = await _get_client().send(upstream_req, stream=True)
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return JSONResponse({"detail": "LeLab backend unreachable"}, status_code=502)
+
+    async def _iter_and_close():
+        try:
+            async for chunk in upstream_res.aiter_raw():
+                yield chunk
+        finally:
+            # Close the upstream on client disconnect. During cancellation the task is
+            # already tearing down, so guard the close with a timeout — it must never
+            # block the response teardown.
+            try:
+                await asyncio.wait_for(upstream_res.aclose(), timeout=2)
+            except Exception:
+                pass
+
+    response_headers = {
+        k: v for k, v in upstream_res.headers.items() if k.lower() in _ALLOWED_RES_HEADERS
+    }
+    return StreamingResponse(
+        _iter_and_close(),
+        status_code=upstream_res.status_code,
+        headers=response_headers,
+    )
+
+
+async def _relay_ws(
+    ws: WebSocket, robot: str, path: str, plugins: dict[str, RobotPlugin], registry
+) -> None:
+    try:
+        _admit(ws, robot, f"ws/{path}", "WS", plugins, registry, is_ws=True)
+    except _RelayRefusal as r:
+        await _refuse(ws, 1008, r.detail)
+        return
+
+    http_api = plugins[robot].http_api()
+    assert http_api is not None  # _admit passed
+    base_url = http_api.base_url
+    parts = urlparse(base_url)
+    scheme = "wss" if parts.scheme == "https" else "ws"
+    upstream_url = f"{scheme}://{parts.netloc}/ws/{path}"
+    try:
+        upstream = await websockets.connect(upstream_url, open_timeout=5, max_size=1_048_576, compression=None)
+    except (OSError, asyncio.TimeoutError, websockets.WebSocketException):
+        await _refuse(ws, 1013, "LeLab backend unreachable")
+        return
+
+    await ws.accept()
+    async with upstream:
+        tasks = [
+            asyncio.create_task(_pump_to_robot(ws, upstream)),
+            asyncio.create_task(_pump_to_browser(ws, upstream)),
+        ]
+        try:
+            _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
 
 def register_http_relay(app: FastAPI, plugins: dict[str, RobotPlugin], registry) -> None:
@@ -215,3 +391,19 @@ def register_http_relay(app: FastAPI, plugins: dict[str, RobotPlugin], registry)
             # An SPA route (/recording) — treated as GET /{robot}/ui/.
             return _ui_root_response(robot, request)
         raise HTTPException(404, "not found")
+
+    # -- §0.17 relay routes ----------------------------------------------------
+
+    http_api_plugins = {name: p for name, p in plugins.items() if p.http_api() is not None}
+    for name in sorted(http_api_plugins):
+        http_api = plugins[name].http_api()
+        assert http_api is not None
+        logger.info("http_relay: /%s/api → %s", name, http_api.base_url)
+
+    @app.api_route("/{robot}/api/{path:path}", methods=["GET", "HEAD", "POST"])
+    async def relay_http(robot: str, path: str, request: Request):
+        return await _relay_http(request, robot, path, plugins, registry)
+
+    @app.websocket("/{robot}/api/ws/{path:path}")
+    async def relay_ws(ws: WebSocket, robot: str, path: str):
+        await _relay_ws(ws, robot, path, plugins, registry)
