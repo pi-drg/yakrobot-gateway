@@ -206,6 +206,25 @@ Serving:
 - `VIDEO_ENABLED` — (optional) set `0`/`false`/`no`/`off` to refuse `/ws/video` for every
   client, for a metered or congested link. Control keeps working: the car stays drivable,
   just blind. Absent means enabled.
+- **Recording** (`RECORDING_ENABLED`, default off) — when on, admitted teleop sockets
+  are tapped to a staging directory for later export to a LeRobotDataset; off means
+  exactly today's behaviour: no tap, no files. `RECORDINGS_DIR` (default
+  `~/.cache/yakrobot/recordings`, expanded and created `0o700`), `RECORDINGS_MAX_GB`
+  (default `20`; at or above this cap new sessions are not recorded),
+  `RECORDING_QUEUE_FRAMES` (default `256`, range 16–65536). Recording is disabled (not
+  a startup error) while `VIDEO_ENABLED` is off, and is reported per-robot as
+  `recording` on the index. The tap only observes traffic — it never decides it: a full
+  or failed writer never delays or closes a socket. Staging files never contain a
+  holder string, a token, or a payer address.
+- **Dataset delivery** (`DATASETS_FILE`, unset) — a TOML file listing the datasets this
+  gateway offers (execution plan §0.6); unset means none. `DATASET_REDEEM_DAYS`
+  (default `30`, range 1–365) is the v2 dataset capability window. `HF_TOKEN` is
+  required once any listing uses `store = "hf"`; the four `R2_*` variables
+  (`R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) are
+  required once any listing uses `store = "r2"`. `R2_URL_TTL_S` (default `3600`, range
+  60–604800) and `R2_ENDPOINT` (default
+  `https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com`, overridable for tests and local
+  fakes).
 - Task auctions live in `yakrobot-marketplace`. Card-paid teleop is gated here, against
   the operator's own Stripe account (below).
 - **Teleop admission is always gated one of two ways — paid or free — never neither.**
