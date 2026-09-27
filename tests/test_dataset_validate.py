@@ -1,7 +1,7 @@
-"""Round-trip tests for `dataset export` (execution plan step 2.3).
+"""Tests for `dataset validate` (execution plan step 2.4).
 
-Skipped unless the ``dataset-export`` extra is installed — lerobot/torch never live in
-the serving gateway's environment, so the normal suite must skip these.
+The structural checks run in the normal suite (no lerobot); the re-open check is skipped
+unless the dataset-export extra is installed.
 """
 
 import io
@@ -11,16 +11,16 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("lerobot")
-
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from PIL import Image  # noqa: E402
+from yakrobot_cli.dataset_export import validate  # noqa: E402
 
 
 def _jpeg():
+    from PIL import Image
+
     buf = io.BytesIO()
     Image.new("RGB", (64, 48), (128, 128, 128)).save(buf, "JPEG")
     return buf.getvalue()
@@ -51,38 +51,44 @@ def _stage_session(root: Path, robot: str, session_id: str, n_frames: int) -> Pa
     return d
 
 
-def test_export_round_trip(tmp_path, monkeypatch):
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+def _fake_v3(tmp_path):
+    d = tmp_path / "ds"
+    (d / "meta").mkdir(parents=True)
+    (d / "meta" / "info.json").write_text(json.dumps({"codebase_version": "v3.0"}))
+    (d / "videos").mkdir()
+    (d / "videos" / "chunk-000" / "file-000.mp4").mkdir(parents=True)
+    (d / "videos" / "chunk-000" / "file-000.mp4" / "x").write_bytes(b"x")
+    (d / "README.md").write_text("card")
+    return d
+
+
+def test_validate_rejects_missing_episode_index(tmp_path):
+    d = _fake_v3(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        validate(str(d))
+    assert "meta/episodes" in str(exc.value)
+
+
+def test_validate_rejects_bad_codebase(tmp_path):
+    d = _fake_v3(tmp_path)
+    (d / "meta" / "info.json").write_text(json.dumps({"codebase_version": "v2.1"}))
+    with pytest.raises(SystemExit) as exc:
+        validate(str(d))
+    assert "v3" in str(exc.value)
+
+
+def test_validate_accepts_exported(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("lerobot")
 
     from yakrobot_cli.dataset_export import export
 
-    session_id = "20260101T000000Z-deadbeef"
-    _stage_session(tmp_path, "fakerobot_picar", session_id, n_frames=60)
+    _stage_session(tmp_path, "fakerobot_picar", "20260101T000000Z-deadbeef", n_frames=60)
     monkeypatch.setenv("RECORDINGS_DIR", str(tmp_path))
-
     out = tmp_path / "out"
     export(
-        "fakerobot_picar", sessions=session_id, segments_file=None, task="test task",
-        fps=10, repo_id="test/export_round_trip", out=str(out), shift_rtt=False,
+        "fakerobot_picar", sessions="20260101T000000Z-deadbeef", segments_file=None, task="t",
+        fps=10, repo_id="test/val", out=str(out), shift_rtt=False,
     )
 
-    ds = LeRobotDataset("test/export_round_trip", root=out)
-    assert ds.num_episodes == 1
-    assert ds.num_frames == 60
-    assert (out / "README.md").exists()
-
-
-def test_export_rejects_no_episodes(tmp_path, monkeypatch):
-    from yakrobot_cli.dataset_export import export
-
-    # Fewer frames than min_episode_s * fps → the resampler drops the episode.
-    session_id = "20260101T000000Z-short"
-    _stage_session(tmp_path, "fakerobot_picar", session_id, n_frames=3)
-    monkeypatch.setenv("RECORDINGS_DIR", str(tmp_path))
-
-    with pytest.raises(SystemExit) as exc:
-        export(
-            "fakerobot_picar", sessions=session_id, segments_file=None, task="t",
-            fps=10, repo_id="test/nope", out=str(tmp_path / "out2"), shift_rtt=False,
-        )
-    assert "no episodes" in str(exc.value)
+    validate(str(out))
+    assert "valid" in capsys.readouterr().out

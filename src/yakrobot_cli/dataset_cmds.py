@@ -108,3 +108,11 @@ def export(
     from . import dataset_export
 
     dataset_export.export(robot, sessions, segments, task, fps, repo_id, out, shift_rtt)
+
+
+@dataset_app.command()
+def validate(path: str = typer.Argument(..., help="Path to a LeRobot v3 dataset")):
+    """Validate a LeRobot v3 dataset (a gateway export or a LeLab recording)."""
+    from . import dataset_export
+
+    dataset_export.validate(path)

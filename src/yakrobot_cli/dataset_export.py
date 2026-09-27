@@ -180,3 +180,40 @@ def export(robot, sessions, segments_file, task, fps, repo_id, out, shift_rtt):
         gateway=gateway, started_utc=started_utc, ended_utc=ended_utc,
     )
     print(f"Exported {len(collected)} episode(s), {frame_count} frame(s) to {root}")
+
+
+def validate(path):
+    """Validate a LeRobot v3 dataset by structure, then re-open it when lerobot is
+    importable. Works for a gateway export and a LeLab recording alike (Source B)."""
+    import json
+
+    root = Path(path)
+
+    info_path = root / "meta" / "info.json"
+    if not info_path.is_file():
+        raise SystemExit(f"not a LeRobot v3 dataset: {info_path} is missing")
+    info = json.loads(info_path.read_text())
+
+    codebase = str(info.get("codebase_version", ""))
+    if not codebase.startswith("v3"):
+        raise SystemExit(f"codebase_version {codebase!r} is not v3")
+
+    episodes_dir = root / "meta" / "episodes"
+    if not episodes_dir.is_dir() or not any(episodes_dir.iterdir()):
+        raise SystemExit("meta/episodes is missing or empty")
+
+    videos_dir = root / "videos"
+    if not videos_dir.is_dir() or not any(videos_dir.iterdir()):
+        raise SystemExit("videos is missing or empty")
+
+    if not (root / "README.md").is_file():
+        raise SystemExit("README.md is missing")
+
+    try:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except ImportError:
+        print(f"valid: {root} (lerobot not installed — skipped re-open)")
+        return
+
+    dataset = LeRobotDataset(root.name, root=root)
+    print(f"valid: {root} ({dataset.num_episodes} episodes, {dataset.num_frames} frames)")
