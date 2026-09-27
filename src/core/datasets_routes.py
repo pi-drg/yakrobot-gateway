@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from core.capability import normalize_host
 from core.r2_presign import presign
@@ -111,6 +111,41 @@ async def _default_hf_grant(repo_id: str, user: str) -> None:
         users = {u.get("user") if isinstance(u, dict) else u for u in accepted}
         if user not in users:
             raise
+
+
+# CORS for the redeem route (and its preflight): the pay page calls it from the payments
+# origin, and ngrok's interstitial forces a preflight.
+_REDEEM_CORS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "content-type, ngrok-skip-browser-warning",
+}
+
+
+def _verify_proof(proof, claims, ts, now: int) -> bool:
+    """§0.11 step 8: the wallet's EIP-191 signature over
+    ``yakrobot-redeem:{sale}:{gateway}:{ts}``, recovering to ``claims.payer``."""
+    if not isinstance(proof, str) or not re.fullmatch(r"0x[0-9a-fA-F]{130}", proof):
+        return False
+    if not isinstance(ts, int) or isinstance(ts, bool) or abs(now - ts) > 300:
+        return False
+
+    from eth_hash.auto import keccak
+    from eth_keys import keys
+    from eth_keys.exceptions import BadSignature, ValidationError
+
+    message = f"yakrobot-redeem:{claims.sale}:{claims.gateway}:{ts}".encode()
+    prefixed = b"\x19Ethereum Signed Message:\n" + str(len(message)).encode() + message
+    digest = keccak(prefixed)
+    try:
+        sig_bytes = bytes.fromhex(proof[2:])
+        signature = keys.Signature(
+            signature_bytes=sig_bytes[:64] + bytes([sig_bytes[64] - 27])
+        )
+        recovered = signature.recover_public_key_from_msg_hash(digest)
+    except (BadSignature, ValidationError, ValueError):
+        return False
+    return recovered.to_checksum_address().lower() == claims.payer.lower()
 
 
 def register_dataset_routes(app: FastAPI, plugins, listings, r2, payments, stripe, redeem_days) -> None:
@@ -339,3 +374,78 @@ def register_dataset_routes(app: FastAPI, plugins, listings, r2, payments, strip
         }
         logger.info("dataset sale: %s/%s %s…", robot, dataset_id, session_id[-6:])
         return await _deliver(listing, robot, dataset_id, recipient, store, request, fmt_json)
+
+    # -- redeem (v2 capability) -------------------------------------------------
+
+    def _redeem_error(status: int, code: str, message: str) -> JSONResponse:
+        return JSONResponse({"code": code, "message": message}, status_code=status,
+                            headers=_REDEEM_CORS)
+
+    @app.options("/{robot}/datasets/{dataset_id}/redeem")
+    def redeem_preflight(robot: str, dataset_id: str):
+        return Response(status_code=204, headers=_REDEEM_CORS)
+
+    @app.post("/{robot}/datasets/{dataset_id}/redeem")
+    async def redeem(robot: str, dataset_id: str, request: Request):
+        from core.capability import CapabilityError, normalize_host, verify_dataset
+
+        if not payments.enabled or not payments.issuer:
+            return _redeem_error(404, "not_enabled", "dataset delivery is not enabled")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return _redeem_error(400, "bad_request", "body must be JSON")
+        if not isinstance(body, dict):
+            return _redeem_error(400, "bad_request", "body must be a JSON object")
+        token = body.get("token")
+        if not isinstance(token, str):
+            return _redeem_error(400, "bad_request", "token is required")
+
+        now = int(time.time())
+        try:
+            claims = verify_dataset(token, payments.issuer, redeem_days=redeem_days, now=now)
+        except CapabilityError:
+            return _redeem_error(403, "invalid_capability", "invalid capability")
+
+        if normalize_host(claims.gateway) != normalize_host(_public_domain(request)):
+            return _redeem_error(403, "wrong_gateway", "capability is for another gateway")
+
+        listing = listings.get(robot, dataset_id)
+        if claims.robot != robot or claims.dataset != dataset_id or listing is None:
+            return _redeem_error(404, "no_such_dataset", "no such dataset")
+
+        if claims.rev != listing.rev:
+            return _redeem_error(409, "relisted", "this dataset has been relisted")
+
+        if claims.exp <= now:
+            return _redeem_error(403, "expired", "capability has expired")
+
+        if claims.recipient.startswith("hf:") and listing.store != "hf":
+            return _redeem_error(409, "wrong_delivery", "recipient does not match the store")
+        if claims.recipient.startswith("wallet:") and listing.store != "r2":
+            return _redeem_error(409, "wrong_delivery", "recipient does not match the store")
+
+        if listing.store == "r2":
+            if not _verify_proof(body.get("proof"), claims, body.get("ts"), now):
+                return _redeem_error(403, "proof_required", "wallet proof required")
+            if r2 is None:
+                return _redeem_error(502, "store_unavailable", "r2 is not configured")
+            try:
+                links = _r2_links(r2, dataset_id, listing.rev)
+            except RuntimeError as exc:
+                return _redeem_error(502, "store_unavailable", str(exc))
+            return JSONResponse(links, headers=_REDEEM_CORS)
+
+        user = claims.recipient.split(":", 1)[1]
+        try:
+            await app.state.hf_grant(listing.hub_repo, user)
+        except Exception as exc:  # noqa: BLE001 — HfHubHTTPError or a test stub
+            return _redeem_error(502, "hub_refused", str(exc)[:200])
+        return JSONResponse({
+            "store": "hf",
+            "granted": True,
+            "hub_repo": listing.hub_repo,
+            "url": f"https://huggingface.co/datasets/{listing.hub_repo}",
+            "load": f"LeRobotDataset('{listing.hub_repo}')",
+        }, headers=_REDEEM_CORS)
