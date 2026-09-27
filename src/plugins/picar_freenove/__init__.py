@@ -77,6 +77,12 @@ class PicarFreenovePlugin(RobotPlugin):
 
         return control_token() or None
 
+    def dataset_features(self):
+        """The PiCar's dataset features — the same object the simulator declares."""
+        from plugins.fakerobot_picar.dataset import FEATURES
+
+        return FEATURES
+
     def register_tools(self, mcp):
         from .robot_adapter import PicarFreenoveAdapter
         from .mcp_tools import register

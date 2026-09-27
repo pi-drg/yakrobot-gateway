@@ -33,3 +33,11 @@ class TemplatePlugin(RobotPlugin):
         from .mcp_tools import register
 
         register(mcp, TemplateAdapter())
+
+    # Optional: opt this robot's teleop sessions into dataset recording.
+    # Return a DatasetFeatures describing the control/telemetry frames (see
+    # plugins/fakerobot_picar/dataset.py for the PiCar example). Omit to stay
+    # non-recordable (the default).
+    # def dataset_features(self):
+    #     from .dataset import FEATURES
+    #     return FEATURES

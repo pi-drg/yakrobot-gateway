@@ -59,3 +59,8 @@ class FakePicarPlugin(RobotPlugin):
         from .robot_adapter import control_base_urls
 
         return control_base_urls()
+
+    def dataset_features(self):
+        from .dataset import FEATURES
+
+        return FEATURES

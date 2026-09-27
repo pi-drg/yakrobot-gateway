@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from fastmcp import FastMCP
 
@@ -32,6 +33,39 @@ class RobotMetadata:
     fleet_domain: str = ""
     image: str = ""
     bidding_terms: BiddingTerms | None = None  # None = not participating in marketplace
+
+
+@dataclass(frozen=True)
+class DatasetFeatures:
+    """How a robot's teleop frames map onto LeRobot features.
+
+    Returned by ``RobotPlugin.dataset_features()`` for robots whose teleop sessions can
+    be recorded and exported as a dataset. Core owns the tap, the queue, the writer and
+    the file layout; the plugin owns what each field means (design §2.2).
+
+    The three callables all take the *parsed JSON object* of one frame (the ``msg`` in a
+    ``control.jsonl`` line) and describe it from the robot's point of view:
+
+    - ``action_update``: an upward (browser→robot) control frame → a partial action dict
+      to merge, or ``None`` to ignore the frame. Returns only the fields this message
+      sets — a ``drive`` carries velocities, a ``look`` carries pan/tilt, and a ``ping``
+      or ``stop`` sets nothing.
+    - ``state_update``: a downward (robot→browser) frame → a partial observation.state
+      dict, or ``None``. The state is what the robot *reported* (a clamped servo echo,
+      a telemetry reading), never what the browser asked for.
+    - ``is_stop``: an upward frame → True when it is an explicit stop.
+    """
+
+    spec_version: int                 # bump when names/meaning change
+    action_names: tuple[str, ...]
+    state_names: tuple[str, ...]
+    camera_key: str                   # LeRobot feature key for the one camera
+    default_fps: int
+    deadman_ms_default: int           # used when hello has no deadman_ms
+    velocity_names: tuple[str, ...]   # subset of action_names zeroed by deadman/stop
+    action_update: Callable[[dict], dict | None]
+    state_update: Callable[[dict], dict | None]
+    is_stop: Callable[[dict], bool]
 
 
 class RobotPlugin(ABC):
@@ -92,6 +126,17 @@ class RobotPlugin(ABC):
 
         None (the default) means the robot has no auth — normal on a trusted
         LAN, and the current state of the PiCar.
+        """
+        return None
+
+    def dataset_features(self) -> DatasetFeatures | None:
+        """Map this robot's control/telemetry frames to LeRobot features.
+
+        Implemented by plugins whose teleop sessions can be recorded and exported as a
+        dataset — the PiCar (and its simulator) declare velocity/pan/tilt actions and a
+        front camera. ``None`` (the default) means the robot is not recordable: the
+        gateway records nothing for it, and the index reports ``recording: false``. This
+        is the same opt-in pattern as ``control_base_urls()``.
         """
         return None
 
