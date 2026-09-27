@@ -20,10 +20,19 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 @dataclass
 class LeLabState:
-    """Mutable state the fake serves from, and the call log."""
+    """Mutable state the fake serves from, and the call log.
 
-    saved_port: dict[str, str] = field(default_factory=dict)    # "leader" | "follower"
-    saved_config: dict[str, str] = field(default_factory=dict)  # "leader" | "follower"
+    The rig starts configured (the §7.1 "returns /dev/ttyFAKE-{t}" default) so the
+    happy-path tools work out of the box; a test that needs "no saved rig" clears these
+    two dicts, and the endpoints then return a ``None`` value for ``saved_*``.
+    """
+
+    saved_port: dict[str, str] = field(
+        default_factory=lambda: {"leader": "/dev/ttyFAKE-leader", "follower": "/dev/ttyFAKE-follower"}
+    )
+    saved_config: dict[str, str] = field(
+        default_factory=lambda: {"leader": "leader.json", "follower": "follower.json"}
+    )
     calls: list[tuple[str, str, object]] = field(default_factory=list)
 
     def record(self, method: str, path: str, body: object = None) -> None:
@@ -76,12 +85,12 @@ def create_fake_lelab(state: LeLabState) -> FastAPI:
     @app.get("/robot-port/{t}")
     async def robot_port(t: str):
         _record("GET", f"/robot-port/{t}")
-        return {"saved_port": state.saved_port.get(t, f"/dev/ttyFAKE-{t}")}
+        return {"saved_port": state.saved_port.get(t)}
 
     @app.get("/robot-config/{t}")
     async def robot_config(t: str):
         _record("GET", f"/robot-config/{t}")
-        return {"saved_config": state.saved_config.get(t, f"{t}.json")}
+        return {"saved_config": state.saved_config.get(t)}
 
     # -- POST commands (the allowlisted ones) ----------------------------------
 
