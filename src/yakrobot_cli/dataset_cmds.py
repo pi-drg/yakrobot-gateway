@@ -141,3 +141,18 @@ def publish(
         license_=license_, source=source, repo_id=repo_id,
         datasets_file=datasets_file, robot=robot,
     )
+
+
+@dataset_app.command()
+def fetch(
+    links: Optional[str] = typer.Option(None, "--links", help="A redeem/confirm JSON URL"),
+    redeem: Optional[str] = typer.Option(None, "--redeem", help="A redeem endpoint URL"),
+    token: Optional[str] = typer.Option(None, "--token"),
+    wallet_key_env: Optional[str] = typer.Option(None, "--wallet-key-env"),
+    out: str = typer.Option(..., "--out", help="Output directory"),
+):
+    """Download a dataset from presigned links, or redeem a capability first."""
+    from . import dataset_fetch
+
+    dataset_fetch.fetch(links=links, redeem=redeem, token=token,
+                        wallet_key_env=wallet_key_env, out=out)

@@ -31,6 +31,9 @@ export = ["yakrobot-descriptor[model]"]
 payments = ["eth-keys>=0.7", "eth-hash[pycryptodome]>=0.7", "httpx>=0.28.1"]
 # Per-operator Stripe fiat gate: raw httpx against the Stripe REST API (no SDK).
 stripe = ["httpx>=0.28.1"]
+# Downloads a dataset from presigned R2 links (`dataset fetch --links`); `--redeem` also
+# needs the `payments` extra for eth_keys.
+fetch = ["httpx>=0.28.1"]
 # Converts staged sessions to LeRobotDataset v3 (the offline `dataset export` command).
 # lerobot is a git pin (the same v0.6.0 LeLab pins) and imports only inside
 # src/yakrobot_cli/dataset_export.py — never in the serving gateway, and never in `all`
