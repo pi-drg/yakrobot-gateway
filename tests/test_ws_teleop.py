@@ -1655,3 +1655,186 @@ def test_index_reports_stripe():
                 assert body["teleop"]["reservation"] == "paid"
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------
+# Recording — the tap observes traffic and never decides it (step 1.4).
+# --------------------------------------------------------------------------
+
+
+def _recording_env(tmp_path, **overrides) -> dict[str, str]:
+    env = _static_env(RECORDING_ENABLED="1", RECORDINGS_DIR=str(tmp_path))
+    env.update(overrides)
+    return env
+
+
+def _session_dirs(tmp_path) -> list[Path]:
+    robot_dir = Path(tmp_path) / "fakerobot_picar"
+    if not robot_dir.exists():
+        return []
+    return sorted(p for p in robot_dir.iterdir() if p.is_dir())
+
+
+async def _wait_for_finalized_session(tmp_path, timeout=5.0):
+    """Poll until a session directory's session.json is finalized (has ended_utc)."""
+    for _ in range(int(timeout / 0.1)):
+        dirs = _session_dirs(tmp_path)
+        if dirs:
+            try:
+                if json.loads((dirs[0] / "session.json").read_text()).get("ended_utc"):
+                    return dirs[0]
+            except (OSError, ValueError):
+                pass
+        await asyncio.sleep(0.1)
+    return None
+
+
+def test_session_recorded_for_static_driver(tmp_path):
+    async def run():
+        from websockets.asyncio.client import connect
+
+        async with _Stack(env=_recording_env(tmp_path)) as stack:
+            async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+                await ws.send(json.dumps({"type": "drive", "vx": 1200}))
+                await ws.send(json.dumps({"type": "look", "pan": 96}))
+                await ws.send(json.dumps({"type": "ping", "t": 99}))
+                # The look echo and the pong are the two down frames after hello.
+                down_types = {(await _recv_json(ws))["type"] for _ in range(2)}
+                assert down_types == {"look", "pong"}
+
+    asyncio.run(run())
+
+    dirs = _session_dirs(tmp_path)
+    assert len(dirs) == 1
+    lines = [json.loads(l) for l in (dirs[0] / "control.jsonl").read_text().splitlines()]
+    ups = [c for c in lines if c["dir"] == "up"]
+    downs = [c for c in lines if c["dir"] == "down"]
+    assert {"drive", "look", "ping"} <= {c["msg"]["type"] for c in ups}
+    down_types = [c["msg"]["type"] for c in downs]
+    assert "hello" in down_types and "look" in down_types and "pong" in down_types
+
+
+def test_video_joins_control_session(tmp_path):
+    async def run():
+        from websockets.asyncio.client import connect
+
+        async with _Stack(env=_recording_env(tmp_path)) as stack:
+            async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+                async with connect(f"{stack.video}?token={STATIC_TOKEN}") as video:
+                    frames = [await asyncio.wait_for(video.recv(), timeout=5) for _ in range(3)]
+                await asyncio.sleep(0.3)
+        return frames
+
+    frames = asyncio.run(run())
+    dirs = _session_dirs(tmp_path)
+    assert len(dirs) == 1
+    blob = (dirs[0] / "video.bin").read_bytes()
+    assert len(blob) > 0
+    assert all(isinstance(f, bytes) and f[:2] == b"\xff\xd8" for f in frames)
+    video_lines = [json.loads(l) for l in (dirs[0] / "video.jsonl").read_text().splitlines()]
+    assert len(video_lines) >= 1
+
+
+def test_reconnect_joins_same_session(tmp_path):
+    async def run():
+        from websockets.asyncio.client import connect
+
+        async with _Stack(env=_recording_env(tmp_path)) as stack:
+            url = f"{stack.control}?token={STATIC_TOKEN}"
+            async with connect(url) as driver:
+                assert (await _recv_json(driver))["type"] == "hello"
+                async with connect(url) as spotter:
+                    assert (await _recv_json(spotter))["type"] == "error"  # busy
+                    # Both sockets share the one session directory: the second control
+                    # socket joined rather than opened a second session (§0.3).
+                    assert len(_session_dirs(tmp_path)) == 1
+            await asyncio.sleep(0.5)
+
+    asyncio.run(run())
+
+
+def test_spectator_session_is_discarded(tmp_path):
+    async def run():
+        from websockets.asyncio.client import connect
+
+        async with _Stack(env=_recording_env(tmp_path)) as stack:
+            url = f"{stack.control}?token={STATIC_TOKEN}"
+            async with connect(url) as driver:
+                assert (await _recv_json(driver))["type"] == "hello"
+                async with connect(url) as spotter:
+                    assert (await _recv_json(spotter))["type"] == "error"  # busy
+                    await _recv_json(spotter)  # hello (controller False)
+            await asyncio.sleep(0.5)
+            # The session saw a "busy" frame → spectator → deleted on close.
+            assert _session_dirs(tmp_path) == []
+
+    asyncio.run(run())
+
+
+def test_no_recording_when_disabled(tmp_path):
+    async def run():
+        from websockets.asyncio.client import connect
+
+        # RECORDING_ENABLED left off — the default is exactly today's behaviour.
+        async with _Stack(env=_static_env(RECORDINGS_DIR=str(tmp_path))) as stack:
+            async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
+                assert (await _recv_json(ws))["type"] == "hello"
+                await ws.send(json.dumps({"type": "drive", "vx": 1200}))
+                await asyncio.sleep(0.2)
+            await asyncio.sleep(0.5)
+
+    asyncio.run(run())
+    assert _session_dirs(tmp_path) == []
+
+
+def test_stalled_writer_never_delays_relay(tmp_path, monkeypatch):
+    async def run():
+        from websockets.asyncio.client import connect
+
+        from core.recorder import Session
+
+        captured = []
+        orig_tap = Session.tap
+
+        def _capture_tap(self, kind, payload):
+            if not captured:
+                captured.append(self)
+            orig_tap(self, kind, payload)
+
+        async def _stall_writer(self):
+            await asyncio.Event().wait()
+
+        async def _close_skip(self):
+            # Test-only: the stalled writer never drains, so finalizing would hang the
+            # teardown. The invariant under test is relay timing + the drop counter, not
+            # a clean session.json.
+            if self._closed:
+                return
+            self._closed = True
+            self._writer_task.cancel()
+            for f in (self._control_f, self._video_f, self._video_meta_f):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+
+        monkeypatch.setattr(Session, "tap", _capture_tap)
+        monkeypatch.setattr(Session, "_writer", _stall_writer)
+        monkeypatch.setattr(Session, "close", _close_skip)
+
+        env = _recording_env(tmp_path, RECORDING_QUEUE_FRAMES="16")
+        async with _Stack(env=env) as stack:
+            async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
+                await _recv_json(ws)
+                for i in range(50):
+                    await ws.send(json.dumps({"type": "ping", "t": i}))
+                    pong = await asyncio.wait_for(_recv_json(ws), timeout=0.5)
+                    assert pong == {"type": "pong", "t": i}
+                # The recorder dropped frames (queue full) while every pong still
+                # arrived promptly — the stalled writer never delayed the relay.
+                assert captured and captured[0].dropped > 0
+        return captured[0].dropped
+
+    assert asyncio.run(run()) > 0

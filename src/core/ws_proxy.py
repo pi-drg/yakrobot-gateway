@@ -49,6 +49,14 @@ safety model that lives on the robot:
    brief reachability cache below is a
    fourth, narrower thing again: it remembers only that a connect just failed, which
    changes how quickly a refusal is returned, never what the robot is permitted to do.
+
+4. **Recording observes traffic and never decides it** (design §0.1). When recording is
+   enabled, each pump hands every relayed frame to a tap that timestamps it and drops it
+   onto a bounded queue for the recorder. The tap is synchronous, drops a frame when the
+   queue is full, and is wrapped so it can never raise into or delay the relay — the
+   send below happens whether or not the tap succeeded. Recording never changes which
+   frames reach the robot or when; if the recorder dies, the car drives exactly as it
+   did before.
 """
 
 import asyncio
@@ -71,8 +79,10 @@ from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocket
 
 from core.capability import CapabilityError, Claims, normalize_host, verify
+from core.datasets_config import RecordingConfig
 from core.descriptor_route import _public_domain
 from core.plugin import RobotPlugin
+from core.recorder import Recordings
 from core.stripe_credential import (
     StripeClaims,
     derive_key,
@@ -274,7 +284,40 @@ async def _refuse(ws: WebSocket, code: int, reason: str) -> None:
         pass
 
 
-async def _pump_to_robot(ws: WebSocket, robot) -> None:
+def _control_tap(session, direction: str):
+    """A control-socket tap: text frames reach ``session.tap``, binary ones are ignored.
+
+    The control protocol is JSON text; a stray binary frame on the control socket is not
+    a command and must not be recorded (§0.4).
+    """
+    def wrapper(payload) -> None:
+        if isinstance(payload, str):
+            session.tap(direction, payload)
+
+    return wrapper
+
+
+def _video_tap(session):
+    """A video-socket tap: binary (JPEG) frames reach ``session.tap``, text is ignored."""
+    def wrapper(payload) -> None:
+        if isinstance(payload, bytes):
+            session.tap("video", payload)
+
+    return wrapper
+
+
+def _call_tap(tap, payload) -> None:
+    """Run a tap without ever letting it break the relay (design §0.1)."""
+    if tap is None:
+        return
+    try:
+        tap(payload)
+    except Exception:
+        # A recorder failure must not delay, reorder or drop a relayed frame.
+        pass
+
+
+async def _pump_to_robot(ws: WebSocket, robot, tap=None) -> None:
     """browser -> robot. Text (control JSON) and binary both pass through."""
     while True:
         message = await ws.receive()
@@ -282,20 +325,24 @@ async def _pump_to_robot(ws: WebSocket, robot) -> None:
             return
         text = message.get("text")
         if text is not None:
+            _call_tap(tap, text)
             await robot.send(text)
             continue
         data = message.get("bytes")
         if data is not None:
+            _call_tap(tap, data)
             await robot.send(data)
 
 
-async def _pump_to_browser(ws: WebSocket, robot) -> None:
+async def _pump_to_browser(ws: WebSocket, robot, tap=None) -> None:
     """robot -> browser. Video frames arrive binary, telemetry as text."""
     async for message in robot:
         try:
             if isinstance(message, str):
+                _call_tap(tap, message)
                 await ws.send_text(message)
             else:
+                _call_tap(tap, message)
                 await ws.send_bytes(message)
         except (RuntimeError, OSError):
             # The browser socket was closed underneath this relay — by a lease release or
@@ -449,6 +496,7 @@ def register_ws_proxy(
     payments,
     free,
     stripe,
+    recording: RecordingConfig,
 ) -> None:
     """Add ``/{robot}/ws/{path}`` to the gateway.
 
@@ -458,15 +506,19 @@ def register_ws_proxy(
     code that never sees a request.
     """
     proxied = {
-        name: (p.control_base_urls(), p.control_auth_token())
+        name: (p.control_base_urls(), p.control_auth_token(), p.dataset_features())
         for name, p in plugins.items()
     }
     proxied = {name: entry for name, entry in proxied.items() if entry[0]}
 
+    # The recorder is always present; open_session() simply declines when recording is
+    # off, the robot has no DatasetFeatures, or the disk cap is reached.
+    recordings = Recordings(recording)
+
     if not proxied:
         logger.info("ws proxy: no plugin exposes a control server; /ws/* not served")
         return
-    for name, (urls, _) in proxied.items():
+    for name, (urls, _token, _features) in proxied.items():
         logger.info("ws proxy: /%s/ws/* -> %s", name, ", ".join(urls))
 
     # Reachability, remembered briefly. Not safety state — deadman, duty caps
@@ -516,7 +568,7 @@ def register_ws_proxy(
             # speaks UDP). Permanent, so send the code that stops the retries.
             await _refuse(ws, 1008, "no realtime socket for this robot")
             return
-        candidates, robot_token = entry
+        candidates, robot_token, features = entry
 
         is_video = path.strip("/") == "video"
 
@@ -534,6 +586,7 @@ def register_ws_proxy(
         renew_client_id: str | None = None
         release_client_id: str | None = None
         lease_key: tuple[str, str] | None = None
+        session_holder: str | None = None
 
         if payments.enabled or stripe.enabled:
             # A paid gate — x402 capability, card-paid HMAC credential, or both — in
@@ -547,6 +600,7 @@ def register_ws_proxy(
             static_clients = _gateway_token_clients()
             if supplied in static_clients:
                 client_id = static_clients[supplied]
+                session_holder = client_id
                 admitted, renew_client_id, release_client_id = _admit_static_client(
                     registry, robot, client_id, is_video
                 )
@@ -572,6 +626,7 @@ def register_ws_proxy(
                     await _refuse(ws, 1008, str(exc))
                     return
                 holder = f"stripe:{claims.lease}"
+                session_holder = holder
                 if released_leases.get(holder, 0) > now:
                     await _refuse(ws, 1008, "lease released")
                     return
@@ -590,6 +645,7 @@ def register_ws_proxy(
                     await _refuse(ws, 1008, str(exc))
                     return
                 holder = f"lease:{claims.lease}"
+                session_holder = holder
                 if released_leases.get(holder, 0) > now:
                     await _refuse(ws, 1008, "lease released")
                     return
@@ -619,6 +675,7 @@ def register_ws_proxy(
             static_clients = _gateway_token_clients()
             if supplied in static_clients:
                 client_id = static_clients[supplied]
+                session_holder = client_id
                 admitted, renew_client_id, release_client_id = _admit_static_client(
                     registry, robot, client_id, is_video
                 )
@@ -633,6 +690,7 @@ def register_ws_proxy(
                     await _refuse(ws, 1008, str(exc))
                     return
                 holder = f"free:{entry.lease_id}"
+                session_holder = holder
                 if not registry.reserve(robot, holder, ttl=entry.exp - now):
                     await _refuse(ws, 1008, "robot is held by another session")
                     return
@@ -697,10 +755,33 @@ def register_ws_proxy(
         if lease_key is not None:
             lease_sockets.setdefault(lease_key, []).append(ws)
 
+        # Recording (§0.3): a control socket opens (or, on a reconnect, joins) the
+        # session for its key; a video socket joins an existing one and taps binary
+        # frames only. open()/join() return None when recording is off, the robot has
+        # no DatasetFeatures, or there is no session to join — recording nothing is the
+        # norm, not an error.
+        session = None
+        if session_holder is not None:
+            if is_video:
+                session = recordings.join(robot, session_holder)
+            else:
+                session = recordings.open(
+                    robot, session_holder, normalize_host(_public_domain(ws)), features
+                )
+
+        up_tap = None
+        down_tap = None
+        if session is not None:
+            if is_video:
+                down_tap = _video_tap(session)
+            else:
+                up_tap = _control_tap(session, "up")
+                down_tap = _control_tap(session, "down")
+
         async with robot_ws:
             tasks = [
-                asyncio.create_task(_pump_to_robot(ws, robot_ws)),
-                asyncio.create_task(_pump_to_browser(ws, robot_ws)),
+                asyncio.create_task(_pump_to_robot(ws, robot_ws, up_tap)),
+                asyncio.create_task(_pump_to_browser(ws, robot_ws, down_tap)),
                 *extra_tasks,
             ]
             try:
@@ -733,6 +814,10 @@ def register_ws_proxy(
                         sockets.remove(ws)
                         if not sockets:
                             lease_sockets.pop(lease_key, None)
+                if session is not None and not is_video:
+                    # A control socket's teardown closes the session when it is the last
+                    # one open; a joined video socket just stops tapping (§0.3).
+                    await recordings.close(robot, session_holder)
         logger.info("ws proxy: %s/ws/%s closed", robot, path)
 
     async def _force_close_lease_sockets(robot: str, holder: str) -> None:
