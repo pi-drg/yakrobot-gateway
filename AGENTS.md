@@ -64,7 +64,9 @@ yakrobot-gateway/
   `/{robot}/ui` (console), `/{robot}/ws/*` (realtime sockets),
   `/{robot}/descriptor` (the descriptor JSON, live),
   `/{robot}/stripe/start` and `/{robot}/stripe/confirm` (card teleop checkout, when the
-  Stripe gate is enabled).
+  Stripe gate is enabled), `/{robot}/razorpay/start` (GET) and
+  `/{robot}/razorpay/confirm` (POST) (UPI teleop checkout, when the Razorpay gate is
+  enabled).
 - Every `/{robot}/mcp` tool passes through `ReservationMiddleware` — a robot reserved by
   one agent rejects control calls from others (identity = per-agent token `client_id`).
 - Plugin auto-discovery scans `src/plugins/` for `RobotPlugin` subclasses.
@@ -207,12 +209,14 @@ Serving:
   client, for a metered or congested link. Control keeps working: the car stays drivable,
   just blind. Absent means enabled.
 - Task auctions live in `yakrobot-marketplace`. Card-paid teleop is gated here, against
-  the operator's own Stripe account (below).
+  the operator's own Stripe account, and UPI-paid teleop against their own Razorpay
+  account (below).
 - **Teleop admission is always gated one of two ways — paid or free — never neither.**
-  Paid means an x402 capability, a card-paid (Stripe) lease, or both; free is on only
-  when neither paid gate is enabled. `PAYMENTS_ENABLED` and `STRIPE_GATE_ENABLED` (both
-  `0`/`1`, default `0`) pick which. There is no separate free-mode toggle and no
-  combination of free with a paid gate.
+  Paid means an x402 capability, a card-paid (Stripe) lease, a UPI-paid (Razorpay)
+  lease, or any mix; free is on only when none of the paid gates is enabled.
+  `PAYMENTS_ENABLED`, `STRIPE_GATE_ENABLED` and `RAZORPAY_GATE_ENABLED` (all `0`/`1`,
+  default `0`) pick which. There is no separate free-mode toggle and no combination of
+  free with a paid gate.
   - **Paid teleop (x402)** (`PAYMENTS_ENABLED=1`): `PAYMENTS_URL` (the `yakrobot-payments`
     service selling leases for this gateway), `PAYMENTS_ISSUER` (its signing key's
     address — capabilities are verified by recovering the signer, never by calling out
@@ -243,7 +247,31 @@ Serving:
     session whose `metadata.gateway` isn't this gateway, so one payment buys one turn
     on one gateway. No refunds from the gateway, ever: refunds and disputes are the
     operator's job in the Stripe dashboard.
-  - **Free teleop** (neither gate enabled): an unpaid, gateway-local "reserve" click
+  - **UPI teleop (Razorpay)** (`RAZORPAY_GATE_ENABLED=1`): the operator's own Razorpay
+    account sells INR leases, mainly by UPI (Checkout also offers cards, netbanking and
+    wallets); money settles to the operator's Indian bank account, with no central
+    service and no chain. Needs `uv sync --extra razorpay` (adds `httpx` only — raw
+    REST, no SDK). `RAZORPAY_KEY_ID` (`rzp_test_…`/`rzp_live_…`) is public — Checkout
+    needs it in the browser. `RAZORPAY_KEY_SECRET` (alphanumeric) is not: a leaked live
+    secret can create orders and issue refunds, and the credential's HMAC key is derived
+    from it, so rotating it logs out active drivers. `RAZORPAY_PRICE_PAISE` (integer
+    ≥ 100; INR only, minimum ₹1), `RAZORPAY_API_BASE` (default
+    `https://api.razorpay.com`), `RAZORPAY_CHECKOUT_JS` (default
+    `https://checkout.razorpay.com/v1/checkout.js`), `RAZORPAY_DISPLAY_NAME` (default
+    `yakrobot`, 1–64 printable characters, shown in Checkout). **Automatic capture must
+    be on** in the Razorpay dashboard: the gateway never calls capture, and confirm
+    refuses a payment that is only `authorized`. `/{robot}/razorpay/start` creates an
+    Order and serves a small page that loads `checkout.js` (the console stays one
+    self-contained file); Checkout then POSTs the order id, payment id and signature to
+    `/{robot}/razorpay/confirm`, so the ids travel in a POST body, never a URL. Confirm
+    checks the signature locally, then fetches the Order and Payment from Razorpay.
+    Razorpay is called only at start/confirm, never while admitting a socket. One
+    Razorpay account may back several gateways: confirm refuses an order whose
+    `notes.gateway` isn't this gateway. No refunds from the gateway, ever: refunds and
+    disputes are the operator's job in the Razorpay Dashboard. The operator needs a
+    Razorpay account, which requires Indian KYC (PAN and an Indian bank account;
+    usually a GSTIN for businesses).
+  - **Free teleop** (no paid gate enabled): an unpaid, gateway-local "reserve" click
     instead of a payment — `POST /{robot}/lease/reserve` grants exclusive control for
     `TELEOP_LEASE_MINUTES` (shared with paid teleop, same default), and
     `POST /{robot}/lease/release` frees it early. No signature, no external service —
@@ -259,6 +287,16 @@ task seems to need `SIGNER_PVT_KEY` or `PINATA_JWT` here, it is in the wrong rep
 `payments` extra is the one exception worth naming explicitly: it adds `eth-keys` solely
 to recover the signer of a paid-teleop capability and compare it to `PAYMENTS_ISSUER` — no
 RPC, no provider, no private key, so it does not violate the rule above.
+
+**Operator setup (UPI):**
+1. Create a Razorpay account and finish KYC.
+2. In **test mode**, generate API keys (Dashboard → Account & Settings → API Keys).
+3. Turn on **automatic capture** for payments.
+4. Set `RAZORPAY_GATE_ENABLED=1`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` and
+   `RAZORPAY_PRICE_PAISE`, then `uv sync --extra razorpay`.
+5. Serve through a tunnel, so Checkout's `callback_url` is public https.
+6. Run a test purchase end to end: drive, release, buy again.
+7. Only then generate live keys.
 
 **Operator setup (card):**
 1. Create or choose a Stripe account.
@@ -276,7 +314,8 @@ RPC, no provider, no private key, so it does not violate the rule above.
 - Add robot-specific dependencies as optional extras in `pyproject.toml`
 - No framework code changes should be needed to add a new robot
 - This repo holds **no chain code**: on-chain concerns belong in `yakrobot-identity`.
-  The `stripe` extra is plain HTTPS to Stripe — no chain, no RPC, no key material.
+  The `stripe` extra is plain HTTPS to Stripe — no chain, no RPC, no key material. The
+  `razorpay` extra is plain HTTPS to Razorpay, with no chain, RPC or key material.
 - **Leave `fleet_provider` and `fleet_domain` empty in a plugin's `metadata()`.** A gateway
   cannot verify whose fleet it belongs to, so filling them in would put an unverified claim
   into the exported descriptor and from there on-chain. Whoever registers the robot supplies
