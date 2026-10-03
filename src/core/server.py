@@ -183,7 +183,9 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
         index_summary,
         load_free_teleop_config,
         load_payments_config,
+        load_razorpay_config,
         load_stripe_config,
+        razorpay_summary,
         stripe_summary,
         teleop_summary,
     )
@@ -208,7 +210,15 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
             raise PaymentsConfigError(
                 "STRIPE_GATE_ENABLED=1 needs: uv sync --extra stripe"
             ) from None
-    free_teleop_cfg = load_free_teleop_config(payments_cfg, stripe_cfg)
+    razorpay_cfg = load_razorpay_config()
+    if razorpay_cfg.enabled:
+        try:
+            import httpx  # noqa: F401
+        except ImportError:
+            raise PaymentsConfigError(
+                "RAZORPAY_GATE_ENABLED=1 needs: uv sync --extra razorpay"
+            ) from None
+    free_teleop_cfg = load_free_teleop_config(payments_cfg, stripe_cfg, razorpay_cfg)
 
     registry = ReservationRegistry()  # shared across every robot server + the index
     reachability = Reachability()  # shared between the proxy's real connects and the probe
@@ -240,6 +250,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     app.state.registry = registry
     app.state.payments = payments_cfg
     app.state.stripe = stripe_cfg
+    app.state.razorpay = razorpay_cfg
     app.state.free_teleop = free_teleop_cfg
     app.state.reachability = reachability
 
@@ -275,7 +286,10 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                 "service": "Robot Fleet Gateway",
                 "payments": index_summary(payments_cfg),
                 "stripe": stripe_summary(stripe_cfg),
-                "teleop": teleop_summary(payments_cfg, free_teleop_cfg, stripe_cfg),
+                "razorpay": razorpay_summary(razorpay_cfg),
+                "teleop": teleop_summary(
+                    payments_cfg, free_teleop_cfg, stripe_cfg, razorpay_cfg
+                ),
                 "robots": {
                     name: {
                         "mcp_endpoint": f"/{name}/mcp",

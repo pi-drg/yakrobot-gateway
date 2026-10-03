@@ -12,6 +12,8 @@ The Stripe fiat gate is a per-operator, per-gateway card path: an operator conne
 their own Stripe account and buyers pay by card, money settling to the operator in fiat.
 It is a sibling of paid teleop, not a replacement — see ``load_stripe_config``. When
 ``STRIPE_GATE_ENABLED`` is off (the default), none of the ``STRIPE_*`` variables are read.
+The Razorpay gate is the same idea for India (UPI, INR): see ``load_razorpay_config``,
+which likewise reads no ``RAZORPAY_*`` variable while ``RAZORPAY_GATE_ENABLED`` is off.
 
 Free reservations are the unpaid sibling: an explicit "reserve" click instead of a
 payment, same ``TELEOP_LEASE_MINUTES`` cap, no money or signature involved — and they
@@ -33,10 +35,15 @@ _PRICE_RE = re.compile(r"^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$")
 _STRIPE_KEY_RE = re.compile(r"^(sk|rk)_(test|live)_[A-Za-z0-9]+$")
 _CURRENCY_RE = re.compile(r"^[a-z]{3}$")
 _TAX_CODE_RE = re.compile(r"^txcd_[0-9]{8}$")
+_RZP_KEY_ID_RE = re.compile(r"^rzp_(test|live)_[A-Za-z0-9]+$")
+_RZP_SECRET_RE = re.compile(r"^[A-Za-z0-9]+$")
 
 _DEFAULT_PRICE_USDC = "1.00"
 _DEFAULT_LEASE_MINUTES = "5"
 _DEFAULT_STRIPE_API_BASE = "https://api.stripe.com"
+_DEFAULT_RAZORPAY_API_BASE = "https://api.razorpay.com"
+_DEFAULT_RAZORPAY_CHECKOUT_JS = "https://checkout.razorpay.com/v1/checkout.js"
+_DEFAULT_RAZORPAY_DISPLAY_NAME = "yakrobot"
 
 
 class PaymentsConfigError(ValueError):
@@ -63,6 +70,20 @@ class StripeConfig:
     livemode: bool | None = None  # derived from the key's _live_/_test_ segment
     automatic_tax: bool = False  # Stripe Tax, tax-inclusive (price_cents includes it)
     tax_code: str | None = None  # None: the account's default product tax code
+
+
+@dataclass(frozen=True)
+class RazorpayConfig:
+    enabled: bool
+    key_id: str | None = None
+    key_secret: str | None = field(default=None, repr=False)
+    price_paise: int | None = None
+    currency: str = "INR"
+    lease_minutes: int | None = None
+    api_base: str | None = None
+    checkout_js: str | None = None
+    display_name: str | None = None
+    livemode: bool | None = None  # from the key id's _live_/_test_ segment; display only
 
 
 @dataclass(frozen=True)
@@ -222,16 +243,76 @@ def load_stripe_config() -> StripeConfig:
     )
 
 
-def load_free_teleop_config(
-    payments: PaymentsConfig, stripe: StripeConfig
-) -> FreeTeleopConfig:
-    """Free reservations are the default whenever neither paid gate is on — no separate
-    toggle, no fully-open fallback. Validates the shared ``TELEOP_LEASE_MINUTES``.
+def load_razorpay_config() -> RazorpayConfig:
+    """Read and validate the RAZORPAY_GATE_ENABLED/RAZORPAY_* variables.
 
-    ``stripe`` is required with no default so a caller that forgets it fails loudly
-    instead of quietly turning free mode on next to a Stripe gate.
+    Raises ``PaymentsConfigError``, naming the offending variable, on any missing or
+    invalid value when ``RAZORPAY_GATE_ENABLED`` is truthy. When it is not, returns
+    ``RazorpayConfig(enabled=False)`` without reading anything else. The key secret's
+    value is never echoed in an error message.
     """
-    if payments.enabled or stripe.enabled:
+    flag = "RAZORPAY_GATE_ENABLED"
+    if os.getenv(flag, "").strip().lower() not in _TRUTHY:
+        return RazorpayConfig(enabled=False)
+
+    key_id = _require("RAZORPAY_KEY_ID", flag=flag)
+    if not _RZP_KEY_ID_RE.match(key_id):
+        raise PaymentsConfigError(
+            "RAZORPAY_KEY_ID must match ^rzp_(test|live)_[A-Za-z0-9]+$"
+        )
+
+    secret = _require("RAZORPAY_KEY_SECRET", flag=flag)
+    if not _RZP_SECRET_RE.match(secret):
+        raise PaymentsConfigError("RAZORPAY_KEY_SECRET must match ^[A-Za-z0-9]+$")
+
+    price_raw = _require("RAZORPAY_PRICE_PAISE", flag=flag)
+    if not price_raw.isdigit() or int(price_raw) < 100:
+        raise PaymentsConfigError(
+            "RAZORPAY_PRICE_PAISE must be an integer of at least 100 (1 rupee)"
+        )
+
+    api_base = _validate_url(
+        "RAZORPAY_API_BASE",
+        os.getenv("RAZORPAY_API_BASE", _DEFAULT_RAZORPAY_API_BASE).strip(),
+    )
+    checkout_js = _validate_url(
+        "RAZORPAY_CHECKOUT_JS",
+        os.getenv("RAZORPAY_CHECKOUT_JS", _DEFAULT_RAZORPAY_CHECKOUT_JS).strip(),
+    )
+
+    display_name = os.getenv("RAZORPAY_DISPLAY_NAME", "").strip()
+    if not display_name:
+        display_name = _DEFAULT_RAZORPAY_DISPLAY_NAME
+    if not (1 <= len(display_name) <= 64) or not display_name.isprintable():
+        raise PaymentsConfigError(
+            "RAZORPAY_DISPLAY_NAME must be 1-64 printable characters"
+        )
+
+    return RazorpayConfig(
+        enabled=True,
+        key_id=key_id,
+        key_secret=secret,
+        price_paise=int(price_raw),
+        currency="INR",
+        lease_minutes=load_lease_minutes(),
+        api_base=api_base,
+        checkout_js=checkout_js,
+        display_name=display_name,
+        livemode="_live_" in key_id,
+    )
+
+
+def load_free_teleop_config(
+    payments: PaymentsConfig, stripe: StripeConfig, razorpay: RazorpayConfig
+) -> FreeTeleopConfig:
+    """Free reservations are the default whenever none of the paid gates is on — no
+    separate toggle, no fully-open fallback. Validates the shared
+    ``TELEOP_LEASE_MINUTES``.
+
+    ``stripe`` and ``razorpay`` are required with no default so a caller that forgets
+    one fails loudly instead of quietly turning free mode on next to a paid gate.
+    """
+    if payments.enabled or stripe.enabled or razorpay.enabled:
         return FreeTeleopConfig(enabled=False)
     return FreeTeleopConfig(enabled=True, lease_minutes=load_lease_minutes())
 
@@ -260,18 +341,33 @@ def stripe_summary(cfg: StripeConfig) -> dict:
     }
 
 
+def razorpay_summary(cfg: RazorpayConfig) -> dict:
+    """The ``razorpay`` object reported on ``GET /`` (decision A.12)."""
+    if not cfg.enabled:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "price_paise": cfg.price_paise,
+        "currency": cfg.currency,
+        "lease_minutes": cfg.lease_minutes,
+    }
+
+
 def teleop_summary(
-    payments: PaymentsConfig, free: FreeTeleopConfig, stripe: StripeConfig
+    payments: PaymentsConfig,
+    free: FreeTeleopConfig,
+    stripe: StripeConfig,
+    razorpay: RazorpayConfig,
 ) -> dict:
-    """The top-level ``teleop`` object reported on ``GET /`` — a sibling of ``payments``
-    and ``stripe`` so the console can tell "none," "free," and "paid" apart with one
-    read. "paid" is reported when either paid gate is on, with ``lease_minutes`` taken
-    from whichever gate is enabled (both read the same env var).
+    """The top-level ``teleop`` object reported on ``GET /`` — a sibling of ``payments``,
+    ``stripe`` and ``razorpay`` so the console can tell "none," "free," and "paid" apart
+    with one read. "paid" is reported when any paid gate is on, with ``lease_minutes``
+    taken from the first enabled gate (payments, stripe, razorpay; all read the same
+    env var).
     """
-    if payments.enabled or stripe.enabled:
-        lease_minutes = (
-            payments.lease_minutes if payments.enabled else stripe.lease_minutes
-        )
+    paid = next((g for g in (payments, stripe, razorpay) if g.enabled), None)
+    if paid is not None:
+        lease_minutes = paid.lease_minutes
         return {"reservation": "paid", "lease_minutes": lease_minutes}
     if free.enabled:
         return {"reservation": "free", "lease_minutes": free.lease_minutes}

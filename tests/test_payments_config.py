@@ -14,11 +14,14 @@ from core.payments_config import (  # noqa: E402
     FreeTeleopConfig,
     PaymentsConfig,
     PaymentsConfigError,
+    RazorpayConfig,
     StripeConfig,
     index_summary,
     load_free_teleop_config,
     load_payments_config,
+    load_razorpay_config,
     load_stripe_config,
+    razorpay_summary,
     stripe_summary,
     teleop_summary,
 )
@@ -43,6 +46,9 @@ def _set(monkeypatch, **env):
         "STRIPE_GATE_ENABLED", "STRIPE_SECRET_KEY", "STRIPE_PRICE_CENTS",
         "STRIPE_CURRENCY", "STRIPE_API_BASE",
         "STRIPE_AUTOMATIC_TAX", "STRIPE_TAX_CODE",
+        "RAZORPAY_GATE_ENABLED", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET",
+        "RAZORPAY_PRICE_PAISE", "RAZORPAY_API_BASE", "RAZORPAY_CHECKOUT_JS",
+        "RAZORPAY_DISPLAY_NAME",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
@@ -167,7 +173,7 @@ def test_index_summary_shapes(monkeypatch):
 def test_free_teleop_enabled_by_default():
     """No separate toggle: free reservations are on whenever no paid gate is on."""
     cfg = load_free_teleop_config(
-        PaymentsConfig(enabled=False), StripeConfig(enabled=False)
+        PaymentsConfig(enabled=False), StripeConfig(enabled=False), RazorpayConfig(enabled=False)
     )
     assert cfg.enabled is True
     assert cfg.lease_minutes == 5  # the shared TELEOP_LEASE_MINUTES default
@@ -176,7 +182,7 @@ def test_free_teleop_enabled_by_default():
 def test_free_teleop_reads_shared_lease_minutes(monkeypatch):
     _set(monkeypatch, TELEOP_LEASE_MINUTES="30")
     cfg = load_free_teleop_config(
-        PaymentsConfig(enabled=False), StripeConfig(enabled=False)
+        PaymentsConfig(enabled=False), StripeConfig(enabled=False), RazorpayConfig(enabled=False)
     )
     assert cfg.lease_minutes == 30
 
@@ -185,7 +191,7 @@ def test_free_teleop_rejects_bad_lease_minutes(monkeypatch):
     _set(monkeypatch, TELEOP_LEASE_MINUTES="0")
     try:
         load_free_teleop_config(
-            PaymentsConfig(enabled=False), StripeConfig(enabled=False)
+            PaymentsConfig(enabled=False), StripeConfig(enabled=False), RazorpayConfig(enabled=False)
         )
         raise AssertionError("expected PaymentsConfigError")
     except PaymentsConfigError as exc:
@@ -194,7 +200,7 @@ def test_free_teleop_rejects_bad_lease_minutes(monkeypatch):
 
 def test_free_teleop_disabled_when_payments_enabled():
     cfg = load_free_teleop_config(
-        PaymentsConfig(enabled=True), StripeConfig(enabled=False)
+        PaymentsConfig(enabled=True), StripeConfig(enabled=False), RazorpayConfig(enabled=False)
     )
     assert cfg.enabled is False
     assert cfg.lease_minutes is None
@@ -206,20 +212,21 @@ def test_teleop_summary_shapes():
     free_off = FreeTeleopConfig(enabled=False)
     free_on = FreeTeleopConfig(enabled=True, lease_minutes=10)
     stripe_off = StripeConfig(enabled=False)
+    rzp_off = RazorpayConfig(enabled=False)
 
-    assert teleop_summary(off, free_off, stripe_off) == {
+    assert teleop_summary(off, free_off, stripe_off, rzp_off) == {
         "reservation": "none", "lease_minutes": None,
     }
-    assert teleop_summary(off, free_on, stripe_off) == {
+    assert teleop_summary(off, free_on, stripe_off, rzp_off) == {
         "reservation": "free", "lease_minutes": 10,
     }
-    assert teleop_summary(paid, free_off, stripe_off) == {
+    assert teleop_summary(paid, free_off, stripe_off, rzp_off) == {
         "reservation": "paid", "lease_minutes": 5,
     }
     # Paid takes precedence in the (unreachable in practice — load_free_teleop_config
     # only ever constructs free_on when neither gate is enabled) case both configs
     # claim to be enabled.
-    assert teleop_summary(paid, free_on, stripe_off) == {
+    assert teleop_summary(paid, free_on, stripe_off, rzp_off) == {
         "reservation": "paid", "lease_minutes": 5,
     }
 
@@ -382,7 +389,7 @@ def test_stripe_repr_hides_secret(monkeypatch):
 def test_free_teleop_off_when_stripe_on(monkeypatch):
     _set(monkeypatch, **VALID_STRIPE)
     stripe = load_stripe_config()
-    cfg = load_free_teleop_config(PaymentsConfig(enabled=False), stripe)
+    cfg = load_free_teleop_config(PaymentsConfig(enabled=False), stripe, RazorpayConfig(enabled=False))
     assert cfg.enabled is False
     assert cfg.lease_minutes is None
 
@@ -391,7 +398,7 @@ def test_teleop_summary_paid_when_only_stripe():
     off = PaymentsConfig(enabled=False)
     stripe = StripeConfig(enabled=True, lease_minutes=7)
     free_off = FreeTeleopConfig(enabled=False)
-    assert teleop_summary(off, free_off, stripe) == {
+    assert teleop_summary(off, free_off, stripe, RazorpayConfig(enabled=False)) == {
         "reservation": "paid", "lease_minutes": 7,
     }
 
@@ -404,5 +411,142 @@ def test_stripe_summary_shapes():
         "enabled": True,
         "price_cents": 150,
         "currency": "usd",
+        "lease_minutes": 5,
+    }
+
+
+# --- Razorpay gate -------------------------------------------------------------
+
+VALID_RZP = {
+    "RAZORPAY_GATE_ENABLED": "1",
+    "RAZORPAY_KEY_ID": "rzp_test_abc123",
+    "RAZORPAY_KEY_SECRET": "secretABC123",
+    "RAZORPAY_PRICE_PAISE": "9900",
+}
+
+
+def _rejects(var):
+    try:
+        load_razorpay_config()
+    except PaymentsConfigError as exc:
+        assert var in str(exc)
+        return str(exc)
+    raise AssertionError(f"expected PaymentsConfigError naming {var}")
+
+
+def test_razorpay_disabled_by_default(monkeypatch):
+    _set(monkeypatch)
+    cfg = load_razorpay_config()
+    assert cfg.enabled is False
+    assert cfg.key_id is None
+    assert cfg.key_secret is None
+    assert cfg.price_paise is None
+
+
+def test_razorpay_disabled_ignores_invalid_other_vars(monkeypatch):
+    _set(monkeypatch, RAZORPAY_KEY_ID="junk", RAZORPAY_PRICE_PAISE="x",
+         RAZORPAY_API_BASE="http://evil.example.com")
+    assert load_razorpay_config() == RazorpayConfig(enabled=False)
+
+
+def test_razorpay_requires_key_id_secret_and_price(monkeypatch):
+    for missing in ("RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_PRICE_PAISE"):
+        env = {k: v for k, v in VALID_RZP.items() if k != missing}
+        _set(monkeypatch, **env)
+        _rejects(missing)
+
+    _set(monkeypatch, **VALID_RZP)
+    cfg = load_razorpay_config()
+    assert cfg.enabled is True
+    assert cfg.key_id == "rzp_test_abc123"
+    assert cfg.price_paise == 9900
+    assert cfg.currency == "INR"
+    assert cfg.lease_minutes == 5
+    assert cfg.api_base == "https://api.razorpay.com"
+    assert cfg.checkout_js == "https://checkout.razorpay.com/v1/checkout.js"
+
+
+def test_razorpay_key_id_format(monkeypatch):
+    for good in ("rzp_test_abc", "rzp_live_abc"):
+        _set(monkeypatch, **{**VALID_RZP, "RAZORPAY_KEY_ID": good})
+        assert load_razorpay_config().key_id == good
+    for bad in ("rzp_abc", "sk_test_abc"):
+        _set(monkeypatch, **{**VALID_RZP, "RAZORPAY_KEY_ID": bad})
+        _rejects("RAZORPAY_KEY_ID")
+
+
+def test_razorpay_secret_format_and_not_echoed(monkeypatch):
+    bad = "has-dash123"
+    _set(monkeypatch, **{**VALID_RZP, "RAZORPAY_KEY_SECRET": bad})
+    assert bad not in _rejects("RAZORPAY_KEY_SECRET")
+
+
+def test_razorpay_price_floor(monkeypatch):
+    for paise in ("99", "abc", "-5", "0"):
+        _set(monkeypatch, **{**VALID_RZP, "RAZORPAY_PRICE_PAISE": paise})
+        _rejects("RAZORPAY_PRICE_PAISE")
+    _set(monkeypatch, **{**VALID_RZP, "RAZORPAY_PRICE_PAISE": "100"})
+    assert load_razorpay_config().price_paise == 100
+
+
+def test_razorpay_api_base_and_checkout_js_https_or_localhost(monkeypatch):
+    for var, attr in (("RAZORPAY_API_BASE", "api_base"),
+                      ("RAZORPAY_CHECKOUT_JS", "checkout_js")):
+        for url in ("https://example.com/x/", "http://127.0.0.1:8194/x",
+                    "http://localhost:3000/x"):
+            _set(monkeypatch, **VALID_RZP, **{var: url})
+            assert getattr(load_razorpay_config(), attr) == url.rstrip("/")
+        _set(monkeypatch, **VALID_RZP, **{var: "http://evil.example.com"})
+        _rejects(var)
+
+
+def test_razorpay_display_name_default_and_length(monkeypatch):
+    _set(monkeypatch, **VALID_RZP)
+    assert load_razorpay_config().display_name == "yakrobot"
+
+    _set(monkeypatch, **VALID_RZP, RAZORPAY_DISPLAY_NAME="Acme Robots")
+    assert load_razorpay_config().display_name == "Acme Robots"
+
+    _set(monkeypatch, **VALID_RZP, RAZORPAY_DISPLAY_NAME="x" * 65)
+    _rejects("RAZORPAY_DISPLAY_NAME")
+    _set(monkeypatch, **VALID_RZP, RAZORPAY_DISPLAY_NAME="bad\x07name")
+    _rejects("RAZORPAY_DISPLAY_NAME")
+
+
+def test_razorpay_livemode_from_key_id(monkeypatch):
+    _set(monkeypatch, **VALID_RZP)
+    assert load_razorpay_config().livemode is False
+    _set(monkeypatch, **{**VALID_RZP, "RAZORPAY_KEY_ID": "rzp_live_abc123"})
+    assert load_razorpay_config().livemode is True
+
+
+def test_razorpay_repr_hides_secret(monkeypatch):
+    _set(monkeypatch, **VALID_RZP)
+    assert "secretABC123" not in repr(load_razorpay_config())
+
+
+def test_free_teleop_off_when_razorpay_on(monkeypatch):
+    _set(monkeypatch, **VALID_RZP)
+    rzp = load_razorpay_config()
+    cfg = load_free_teleop_config(PaymentsConfig(enabled=False), StripeConfig(enabled=False), rzp)
+    assert cfg.enabled is False
+    assert cfg.lease_minutes is None
+
+
+def test_teleop_summary_paid_when_only_razorpay():
+    rzp = RazorpayConfig(enabled=True, lease_minutes=9)
+    assert teleop_summary(
+        PaymentsConfig(enabled=False), FreeTeleopConfig(enabled=False),
+        StripeConfig(enabled=False), rzp,
+    ) == {"reservation": "paid", "lease_minutes": 9}
+
+
+def test_razorpay_summary_shapes():
+    assert razorpay_summary(RazorpayConfig(enabled=False)) == {"enabled": False}
+    cfg = RazorpayConfig(enabled=True, price_paise=9900, lease_minutes=5)
+    assert razorpay_summary(cfg) == {
+        "enabled": True,
+        "price_paise": 9900,
+        "currency": "INR",
         "lease_minutes": 5,
     }
