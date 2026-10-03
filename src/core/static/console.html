@@ -454,6 +454,7 @@
     <p id="paywallPrice" class="paywall-price"></p>
     <a id="paywallLink" class="stop" href="#">Pay in crypto</a>
     <a id="paywallCardLink" class="stop" hidden>Pay by card</a>
+    <a id="paywallUpiLink" class="stop" hidden>Pay with UPI</a>
     <p id="reserveBanner" class="paywall-reservation" role="status" hidden></p>
   </div>
 </div>
@@ -632,7 +633,7 @@
                     "speedVal","maxDuty","helpBtn","help","helpClose","keys","vx","vy","om",
                     "tag","vyWrap","videoBtn","camoff","pad","padStop","padCentre","padBtn",
                     "reserveBanner","leaseCountdown","paywall","paywallHeading","paywallReason",
-                    "paywallPrice","paywallLink","paywallCardLink","txLink","txLinkAnchor","releaseBtn"]) els[id] = $(id);
+                    "paywallPrice","paywallLink","paywallCardLink","paywallUpiLink","txLink","txLinkAnchor","releaseBtn"]) els[id] = $(id);
 
   let cfg = { maxDuty: 1400, deadmanMs: 700, holonomic: true };
   let control = null, degraded = false, isController = true;
@@ -864,6 +865,7 @@
 
   let payments = { enabled: false };
   let stripe = { enabled: false };
+  let razorpay = { enabled: false };
   let teleop = { reservation: "none", lease_minutes: null };
   let latestIndex = null;
   let capability = null;   // { token, claims } | null — never verified client-side
@@ -1005,6 +1007,7 @@
       const label = stripe.currency === "usd" ? `$${amt}` : `${amt} ${stripe.currency.toUpperCase()}`;
       priceParts.push(`${label} by card`);
     }
+    if (razorpay.enabled) priceParts.push(`\u20b9${(razorpay.price_paise / 100).toFixed(2)} by UPI`);
 
     els.paywallHeading.textContent = isFree ? "Reserve to drive" : "Pay to drive";
     els.paywallPrice.textContent = isFree
@@ -1025,6 +1028,7 @@
         els.paywallLink.setAttribute("aria-disabled", "true");
       }
       els.paywallCardLink.hidden = true;
+      els.paywallUpiLink.hidden = true;
       return;
     }
 
@@ -1059,6 +1063,21 @@
         els.paywallCardLink.removeAttribute("href");
         els.paywallCardLink.textContent = !online ? "Robot is offline" : "Robot is in use";
         els.paywallCardLink.setAttribute("aria-disabled", "true");
+      }
+    }
+
+    // The UPI link: same gating as the card link. It is plain navigation to
+    // /{robot}/razorpay/start, which serves the page that opens Razorpay Checkout.
+    els.paywallUpiLink.hidden = !razorpay.enabled;
+    if (razorpay.enabled) {
+      if (online && !heldByOther) {
+        els.paywallUpiLink.href = base + "/razorpay/start";
+        els.paywallUpiLink.textContent = "Pay with UPI";
+        els.paywallUpiLink.removeAttribute("aria-disabled");
+      } else {
+        els.paywallUpiLink.removeAttribute("href");
+        els.paywallUpiLink.textContent = !online ? "Robot is offline" : "Robot is in use";
+        els.paywallUpiLink.setAttribute("aria-disabled", "true");
       }
     }
   }
@@ -1112,14 +1131,15 @@
     const isMine = capability && (
       holder === "lease:" + capability.claims.lease ||
       holder === "free:" + capability.claims.lease ||
-      holder === "stripe:" + capability.claims.lease
+      holder === "stripe:" + capability.claims.lease ||
+      holder === "razorpay:" + capability.claims.lease
     );
     if (isMine) {
       els.reserveBanner.hidden = true;
       return;
     }
     const seconds = Math.max(0, Math.round(reservation.expires_in));
-    els.reserveBanner.textContent = (holder.startsWith("lease:") || holder.startsWith("free:") || holder.startsWith("stripe:"))
+    els.reserveBanner.textContent = (holder.startsWith("lease:") || holder.startsWith("free:") || holder.startsWith("stripe:") || holder.startsWith("razorpay:"))
       ? `Someone else is driving this robot — free in ~${seconds}s`
       : `An agent (${holder}) is controlling this robot — free in ~${seconds}s`;
     els.reserveBanner.hidden = false;
@@ -1144,6 +1164,7 @@
       latestIndex = index;
       if (index.payments) payments = index.payments;
       if (index.stripe) stripe = index.stripe;
+      if (index.razorpay) razorpay = index.razorpay;
       if (index.teleop) teleop = index.teleop;
       paintReservationBanner(index.robots?.[robotName]?.reservation);
       if (paywalled) showPaywall(els.paywallReason.hidden ? null : els.paywallReason.textContent);
@@ -1156,6 +1177,7 @@
     if (index) {
       if (index.payments) payments = index.payments;
       if (index.stripe) stripe = index.stripe;
+      if (index.razorpay) razorpay = index.razorpay;
       if (index.teleop) teleop = index.teleop;
       paintReservationBanner(index.robots?.[robotName]?.reservation);
     }
@@ -1165,7 +1187,7 @@
     // whatever token is on hand — today's behaviour — rather than guessing at a
     // dead screen; if a gate really is on, the server's own 1008 refusal reaches
     // the same paywall via onLeaseRefused.
-    const gated = payments.enabled || stripe.enabled || teleop.reservation === "free";
+    const gated = payments.enabled || stripe.enabled || razorpay.enabled || teleop.reservation === "free";
     teleopLog("bootstrap", { indexLoaded: !!index, gated, staticToken: !!staticToken, hasCapability: !!capability });
     if (index && gated && !staticToken && !capability) {
       showPaywall(null);
@@ -1227,6 +1249,11 @@
   // which 302s to Stripe and back through confirm. No fetch here.
   els.paywallCardLink.addEventListener("click", e => {
     if (els.paywallCardLink.getAttribute("aria-disabled") === "true") e.preventDefault();
+  });
+
+  // Same for UPI — navigation only, no fetch.
+  els.paywallUpiLink.addEventListener("click", e => {
+    if (els.paywallUpiLink.getAttribute("aria-disabled") === "true") e.preventDefault();
   });
 
   // Never refunds — only frees the robot early for whoever's next (see
