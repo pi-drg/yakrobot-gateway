@@ -12,6 +12,7 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from capability_helper import mint  # noqa: E402
+from tools.fake_razorpay import RazorpayState, create_fake_razorpay, pay, signature  # noqa: E402
 from tools.fake_stripe import StripeState, create_fake_stripe, paid_session  # noqa: E402
 
 SIM_PORT, GW_PORT = 8191, 8192
@@ -1650,6 +1652,627 @@ def test_index_reports_stripe():
                     "enabled": True,
                     "price_cents": 100,
                     "currency": "usd",
+                    "lease_minutes": 5,
+                }
+                assert body["teleop"]["reservation"] == "paid"
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------
+# Razorpay (UPI) gate — start/confirm endpoints, UPI-paid admission, release.
+# --------------------------------------------------------------------------
+
+RZP_ROBOT = f"http://127.0.0.1:{GW_PORT}/fakerobot_picar"
+
+
+def _razorpay_env(**overrides) -> dict[str, str]:
+    env = {
+        "RAZORPAY_GATE_ENABLED": "1",
+        "RAZORPAY_KEY_ID": "rzp_test_fake",
+        "RAZORPAY_KEY_SECRET": "fakesecret",
+        "RAZORPAY_PRICE_PAISE": "9900",
+        "TELEOP_LEASE_MINUTES": "5",
+    }
+    env.update(overrides)
+    return env
+
+
+class _FakeRazorpay:
+    """Serve the fake Razorpay on GW_PORT + 21 and expose its state for assertions."""
+
+    def __init__(self):
+        self.port = GW_PORT + 21
+        self.state = RazorpayState()  # key id / secret match _razorpay_env's
+
+    async def __aenter__(self):
+        self._server, self._task = await _serve(create_fake_razorpay(self.state), self.port)
+        return self
+
+    async def __aexit__(self, *exc):
+        self._server.should_exit = True
+        await self._task
+
+    def env(self, **overrides) -> dict[str, str]:
+        return _razorpay_env(
+            RAZORPAY_API_BASE=f"http://127.0.0.1:{self.port}",
+            RAZORPAY_CHECKOUT_JS=f"http://127.0.0.1:{self.port}/v1/checkout.js",
+            **overrides,
+        )
+
+
+def _order_id_from(page: str) -> str:
+    # Exactly 14 characters, so it cannot match the JSON key "order_id".
+    return re.search(r"order_[A-Za-z0-9]{14}", page).group(0)
+
+
+async def _rzp_confirm(client, robot: str, fields: dict):
+    return await client.post(
+        f"http://127.0.0.1:{GW_PORT}/{robot}/razorpay/confirm",
+        data=fields,
+        follow_redirects=False,
+    )
+
+
+async def _rzp_start(client) -> str:
+    r = await client.get(f"{RZP_ROBOT}/razorpay/start")
+    assert r.status_code == 200
+    return _order_id_from(r.text)
+
+
+async def _rzp_buy(client, fake, **pay_kw):
+    """start -> pay (in the fake) -> confirm. Returns (order_id, fields, response)."""
+    oid = await _rzp_start(client)
+    fields = pay(fake.state, oid, **pay_kw)
+    return oid, fields, await _rzp_confirm(client, "fakerobot_picar", fields)
+
+
+def test_razorpay_start_creates_order_and_serves_checkout_page():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(f"{RZP_ROBOT}/razorpay/start")
+                assert r.status_code == 200
+                body = fake.state.created_bodies[0]
+                assert body["amount"] == 9900
+                assert body["currency"] == "INR"
+                assert body["notes"]["robot"] == "fakerobot_picar"
+                assert body["notes"]["gateway"] == f"127.0.0.1:{GW_PORT}"
+                oid = _order_id_from(r.text)
+                assert oid in fake.state.orders
+                assert "rzp_test_fake" in r.text
+                assert f"http://127.0.0.1:{fake.port}/v1/checkout.js" in r.text
+                assert "/fakerobot_picar/razorpay/confirm" in r.text
+                assert "fakesecret" not in r.text
+                assert 'name="viewport"' in r.text
+
+    asyncio.run(run())
+
+
+def test_razorpay_start_page_escapes_script_breakout():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env(RAZORPAY_DISPLAY_NAME="</script><b>x")):
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(f"{RZP_ROBOT}/razorpay/start")
+                assert r.status_code == 200
+                assert "</script><b>" not in r.text
+
+    asyncio.run(run())
+
+
+def test_razorpay_start_refused_while_reserved():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _FakeRazorpay() as fake:
+            env = fake.env(MCP_TOKENS=f"operator={STATIC_TOKEN}")
+            async with _Stack(env=env) as stack:
+                async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+                    async with httpx.AsyncClient() as client:
+                        r = await client.get(f"{RZP_ROBOT}/razorpay/start")
+                    assert r.status_code == 409
+                    assert fake.state.created_bodies == []
+
+    asyncio.run(run())
+
+
+def test_razorpay_start_404_when_disabled():
+    async def run():
+        import httpx
+
+        async with _Stack():
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"{RZP_ROBOT}/razorpay/start")
+                assert r.status_code == 404
+                r = await _rzp_confirm(client, "fakerobot_picar", {})
+                assert r.status_code == 404
+
+    asyncio.run(run())
+
+
+def test_razorpay_start_503_when_razorpay_unreachable():
+    async def run():
+        import httpx
+
+        async with _Stack(env=_razorpay_env(RAZORPAY_API_BASE="http://127.0.0.1:9")):
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"{RZP_ROBOT}/razorpay/start")
+                assert r.status_code == 503
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_admits_and_reserves():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()) as stack:
+                async with httpx.AsyncClient() as client:
+                    oid, _, r = await _rzp_buy(client, fake)
+                    assert r.status_code == 303
+                    assert r.headers["location"].startswith("/fakerobot_picar/ui#token=")
+                    credential = _credential_from(r.headers["location"])
+                    claims = _decode_claims(credential)
+                    assert claims["kind"] == "razorpay"
+                    assert claims["payer"] == "upi"
+                    assert claims["lease"] == oid
+
+                    idx = (await client.get(f"http://127.0.0.1:{GW_PORT}/")).json()
+                    assert idx["robots"]["fakerobot_picar"]["reservation"]["holder"] == f"razorpay:{oid}"
+
+                async with connect(f"{stack.control}?token={credential}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_bad_signature_makes_no_api_call():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    oid = await _rzp_start(client)
+                    fields = pay(fake.state, oid)
+                    fields["razorpay_signature"] = "0" * 64
+                    r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                    assert r.status_code == 400
+                    assert not fake.state.fetch_calls
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_bad_ids_400():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                good = {
+                    "razorpay_order_id": "order_ABCDEFGHIJKLMN",
+                    "razorpay_payment_id": "pay_ABCDEFGHIJKLMN",
+                    "razorpay_signature": "0" * 64,
+                }
+                async with httpx.AsyncClient() as client:
+                    bad_bodies = [
+                        {},
+                        {k: v for k, v in good.items() if k != "razorpay_order_id"},
+                        {**good, "razorpay_order_id": "order_../x"},
+                        {**good, "razorpay_payment_id": "nope"},
+                        {**good, "razorpay_signature": "ZZ"},
+                        {**good, "razorpay_signature": "A" * 64},
+                    ]
+                    for fields in bad_bodies:
+                        r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                        assert r.status_code == 400, fields
+                    big = await client.post(
+                        f"{RZP_ROBOT}/razorpay/confirm",
+                        content=b"x=" + b"a" * 5000,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        follow_redirects=False,
+                    )
+                    assert big.status_code == 400
+                    assert not fake.state.fetch_calls
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_is_idempotent():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    oid, fields, r = await _rzp_buy(client, fake)
+                    assert r.status_code == 303
+                    r2 = await _rzp_confirm(client, "fakerobot_picar", fields)
+                    assert r2.status_code == 303
+                    assert fake.state.fetch_calls[f"/v1/orders/{oid}"] == 1
+                    idx = (await client.get(f"http://127.0.0.1:{GW_PORT}/")).json()
+                    assert idx["robots"]["fakerobot_picar"]["reservation"]["holder"] == f"razorpay:{oid}"
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_rejects_authorized_not_captured():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    # An authorized payment leaves the order "attempted", so mark the
+                    # order paid to reach the payment-level check.
+                    oid = await _rzp_start(client)
+                    fields = pay(fake.state, oid, status="authorized")
+                    fake.state.orders[oid].update(status="paid", amount_paid=9900)
+                    r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                    assert r.status_code == 402
+                    assert "automatic capture" in r.text
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_rejects_unpaid_order():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    oid = await _rzp_start(client)  # order stays "created"
+                    pid = "pay_ABCDEFGHIJKLMN"
+                    fields = {
+                        "razorpay_order_id": oid,
+                        "razorpay_payment_id": pid,
+                        "razorpay_signature": signature(fake.state.secret, oid, pid),
+                    }
+                    r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                    assert r.status_code == 402
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_wrong_amount():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    _, _, r = await _rzp_buy(client, fake, amount=5000)
+                    assert r.status_code == 409
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_other_robot():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    oid = await _rzp_start(client)
+                    fake.state.orders[oid]["notes"]["robot"] = "someone_else"
+                    r = await _rzp_confirm(client, "fakerobot_picar", pay(fake.state, oid))
+                    assert r.status_code == 400
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_other_gateway():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    oid = await _rzp_start(client)
+                    fake.state.orders[oid]["notes"]["gateway"] = "other.example"
+                    r = await _rzp_confirm(client, "fakerobot_picar", pay(fake.state, oid))
+                    assert r.status_code == 400
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_unknown_order():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    oid, pid = "order_ZZZZZZZZZZZZZZ", "pay_ZZZZZZZZZZZZZZ"
+                    fields = {
+                        "razorpay_order_id": oid,
+                        "razorpay_payment_id": pid,
+                        "razorpay_signature": signature(fake.state.secret, oid, pid),
+                    }
+                    r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                    assert r.status_code == 400
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_payment_for_other_order():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    oid_a = await _rzp_start(client)
+                    oid_b = await _rzp_start(client)
+                    pay(fake.state, oid_a)
+                    fields_b = pay(fake.state, oid_b)
+                    pid_b = fields_b["razorpay_payment_id"]
+                    fields = {
+                        "razorpay_order_id": oid_a,
+                        "razorpay_payment_id": pid_b,
+                        "razorpay_signature": signature(fake.state.secret, oid_a, pid_b),
+                    }
+                    r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                    assert r.status_code == 400
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_503_when_unreachable():
+    async def run():
+        import httpx
+
+        async with _Stack(env=_razorpay_env(RAZORPAY_API_BASE="http://127.0.0.1:9")):
+            async with httpx.AsyncClient() as client:
+                oid, pid = "order_ABCDEFGHIJKLMN", "pay_ABCDEFGHIJKLMN"
+                fields = {
+                    "razorpay_order_id": oid,
+                    "razorpay_payment_id": pid,
+                    "razorpay_signature": signature("fakesecret", oid, pid),
+                }
+                r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                assert r.status_code == 503
+
+    asyncio.run(run())
+
+
+def test_razorpay_exp_anchored_to_payment():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            now = int(time.time())
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    _, _, r = await _rzp_buy(client, fake, created=now - 100)
+                claims = _decode_claims(_credential_from(r.headers["location"]))
+                assert claims["exp"] == (now - 100) + 300
+
+    asyncio.run(run())
+
+
+def test_razorpay_confirm_after_lease_window_refused():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            now = int(time.time())
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    _, _, r = await _rzp_buy(client, fake, created=now - 301)
+                assert r.status_code == 409
+
+    asyncio.run(run())
+
+
+def test_razorpay_socket_closes_at_exp():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _FakeRazorpay() as fake:
+            now = int(time.time())
+            async with _Stack(env=fake.env()) as stack:
+                async with httpx.AsyncClient() as client:
+                    _, _, r = await _rzp_buy(client, fake, created=now - 298)
+                credential = _credential_from(r.headers["location"])
+                async with connect(f"{stack.control}?token={credential}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+                    with pytest.raises(Exception):
+                        await asyncio.wait_for(ws.recv(), timeout=5)
+                    assert ws.close_code == 1008
+                    assert ws.close_reason == "lease expired"
+
+    asyncio.run(run())
+
+
+def test_razorpay_release_frees_and_blocks_reconnect_and_reconfirm():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()) as stack:
+                async with httpx.AsyncClient() as client:
+                    _, fields, confirm = await _rzp_buy(client, fake)
+                    credential = _credential_from(confirm.headers["location"])
+
+                    r = await client.post(
+                        f"{RZP_ROBOT}/lease/release", json={"token": credential}
+                    )
+                    assert r.json() == {"released": True}
+
+                    code, reason = await _refusal(f"{stack.control}?token={credential}")
+                    assert (code, reason) == (1008, "lease released")
+
+                    again = await _rzp_confirm(client, "fakerobot_picar", fields)
+                    assert again.status_code == 409
+
+    asyncio.run(run())
+
+
+def test_razorpay_credential_survives_gateway_restart():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _FakeRazorpay() as fake:
+            env = fake.env()
+            async with _Stack(env=env):
+                async with httpx.AsyncClient() as client:
+                    _, _, confirm = await _rzp_buy(client, fake)
+                    credential = _credential_from(confirm.headers["location"])
+
+            # New gateway process (fresh registry), same secret -> same derived key.
+            async with _Stack(env=env) as stack:
+                async with connect(f"{stack.control}?token={credential}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+
+    asyncio.run(run())
+
+
+def test_razorpay_paid_while_agent_holds():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _FakeRazorpay() as fake:
+            env = fake.env(MCP_TOKENS=f"operator={STATIC_TOKEN}")
+            async with _Stack(env=env) as stack:
+                async with connect(f"{stack.control}?token={STATIC_TOKEN}") as ws:
+                    assert (await _recv_json(ws))["type"] == "hello"
+                    oid = "order_ABCDEFGHIJKLMN"
+                    fake.state.orders[oid] = {
+                        "id": oid, "entity": "order", "amount": 9900, "amount_paid": 0,
+                        "amount_due": 9900, "currency": "INR", "status": "created",
+                        "attempts": 0, "created_at": int(time.time()),
+                        "notes": {"robot": "fakerobot_picar", "gateway": f"127.0.0.1:{GW_PORT}"},
+                    }
+                    fields = pay(fake.state, oid)
+                    async with httpx.AsyncClient() as client:
+                        r = await _rzp_confirm(client, "fakerobot_picar", fields)
+                        assert r.status_code == 303
+                        credential = _credential_from(r.headers["location"])
+                    code, reason = await _refusal(f"{stack.control}?token={credential}")
+                    assert (code, reason) == (1008, "robot is held by another session")
+
+    asyncio.run(run())
+
+
+def test_razorpay_only_refuses_stripe_and_x402_tokens(monkeypatch):
+    async def run():
+        from core.stripe_credential import StripeClaims, derive_key, mint as mint_stripe
+
+        pk, _ = _new_issuer()
+        x402 = mint(_capability_claims(), pk.to_hex())
+        now = int(time.time())
+        stripe_token = mint_stripe(
+            StripeClaims(v=1, kind="stripe", robot="fakerobot_picar",
+                         gateway=f"127.0.0.1:{GW_PORT}", lease="cs_test_1",
+                         payer="card", iat=now, exp=now + 300),
+            derive_key("fakesecret"),
+        )
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()) as stack:
+                # If the x402 branch were reached, capability.verify's lazy import would
+                # raise and the handshake would fail instead of returning a clean 1008.
+                monkeypatch.setitem(sys.modules, "eth_keys", None)
+                for token in (x402, stripe_token):
+                    code, reason = await _refusal(f"{stack.control}?token={token}")
+                    assert (code, reason) == (1008, "invalid lease")
+
+    asyncio.run(run())
+
+
+def test_razorpay_only_no_token_is_payment_required():
+    async def run():
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()) as stack:
+                assert await _refusal(stack.control) == (1008, "payment required")
+
+    asyncio.run(run())
+
+
+def test_free_reserve_404_when_razorpay_on():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    r = await client.post(f"{RZP_ROBOT}/lease/reserve")
+                assert r.status_code == 404
+
+    asyncio.run(run())
+
+
+def test_razorpay_and_stripe_coexist():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _FakeStripe() as fake_s, _FakeRazorpay() as fake_r:
+            env = {**fake_s.env(), **fake_r.env()}
+            async with _Stack(env=env) as stack:
+                async with httpx.AsyncClient() as client:
+                    # A Stripe credential admits; then it is released.
+                    sid = "cs_test_1"
+                    fake_s.state.sessions[sid] = paid_session(sid, "fakerobot_picar")
+                    r = await client.get(
+                        f"{RZP_ROBOT}/stripe/confirm?session_id={sid}",
+                        follow_redirects=False,
+                    )
+                    stripe_cred = _credential_from(r.headers["location"])
+                    async with connect(f"{stack.control}?token={stripe_cred}") as ws:
+                        assert (await _recv_json(ws))["type"] == "hello"
+                        rel = await client.post(
+                            f"{RZP_ROBOT}/lease/release", json={"token": stripe_cred}
+                        )
+                        assert rel.json() == {"released": True}
+
+                    # Then a Razorpay credential admits.
+                    _, _, r = await _rzp_buy(client, fake_r)
+                    rzp_cred = _credential_from(r.headers["location"])
+                    async with connect(f"{stack.control}?token={rzp_cred}") as ws:
+                        assert (await _recv_json(ws))["type"] == "hello"
+                        # While the Razorpay holder has it, a Stripe connect is refused.
+                        sid2 = "cs_test_2"
+                        fake_s.state.sessions[sid2] = paid_session(sid2, "fakerobot_picar")
+                        r2 = await client.get(
+                            f"{RZP_ROBOT}/stripe/confirm?session_id={sid2}",
+                            follow_redirects=False,
+                        )
+                        stripe_cred2 = _credential_from(r2.headers["location"])
+                        code, reason = await _refusal(f"{stack.control}?token={stripe_cred2}")
+                        assert (code, reason) == (1008, "robot is held by another session")
+
+    asyncio.run(run())
+
+
+def test_index_reports_razorpay():
+    async def run():
+        import httpx
+
+        async with _FakeRazorpay() as fake:
+            async with _Stack(env=fake.env()):
+                async with httpx.AsyncClient() as client:
+                    body = (await client.get(f"http://127.0.0.1:{GW_PORT}/")).json()
+                assert body["razorpay"] == {
+                    "enabled": True,
+                    "price_paise": 9900,
+                    "currency": "INR",
                     "lease_minutes": 5,
                 }
                 assert body["teleop"]["reservation"] == "paid"

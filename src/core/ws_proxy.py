@@ -45,7 +45,9 @@ safety model that lives on the robot:
    restart-amnesiac ``free_leases`` dict stands in for the capability, driving the same
    registry hold, expiry and release machinery. A card-paid (Stripe) lease is the same
    decision once more: it is verified once against Stripe at confirm, then carried by a
-   locally verified HMAC credential, and the gateway stores no commercial record. The
+   locally verified HMAC credential, and the gateway stores no commercial record. A
+   Razorpay (UPI) lease works the same way as a card lease, except that its confirm is
+   a POST, so the order, payment and signature ids never reach a URL. The
    brief reachability cache below is a
    fourth, narrower thing again: it remembers only that a connect just failed, which
    changes how quickly a refusal is returned, never what the robot is permitted to do.
@@ -53,6 +55,8 @@ safety model that lives on the robot:
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import html
 import json
 import logging
@@ -62,7 +66,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass
-from urllib.parse import parse_qsl, quote, urlencode, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse
 
 import websockets
 from fastapi import FastAPI, HTTPException, Request
@@ -73,6 +77,13 @@ from starlette.websockets import WebSocket
 from core.capability import CapabilityError, Claims, normalize_host, verify
 from core.descriptor_route import _public_domain
 from core.plugin import RobotPlugin
+from core.razorpay_credential import (
+    RazorpayClaims,
+    derive_key as derive_razorpay_key,
+    is_razorpay_credential,
+    mint as mint_razorpay,
+    verify as verify_razorpay,
+)
 from core.stripe_credential import (
     StripeClaims,
     derive_key,
@@ -129,6 +140,23 @@ def _stripe_headers(cfg) -> dict[str, str]:
     }
 
 
+# Razorpay REST calls: Basic auth with key_id:key_secret. Razorpay has no API-version
+# header, so there is nothing to pin (unlike STRIPE_API_VERSION above).
+RAZORPAY_TIMEOUT_S = 5.0
+
+# Order / payment ids and Checkout's signature, validated before they are put into a
+# Razorpay URL (blocks path injection) or compared.
+_RZP_ORDER_RE = re.compile(r"^order_[A-Za-z0-9]+$")
+_RZP_PAYMENT_RE = re.compile(r"^pay_[A-Za-z0-9]+$")
+_RZP_SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _razorpay_auth(cfg):
+    import httpx
+
+    return httpx.BasicAuth(cfg.key_id, cfg.key_secret)
+
+
 def _public_origin(conn: HTTPConnection) -> str:
     """The browser-facing origin for success/cancel URLs.
 
@@ -140,7 +168,9 @@ def _public_origin(conn: HTTPConnection) -> str:
     return f"{scheme}://{domain}"
 
 
-def _stripe_page(status: int, robot: str, message: str) -> HTMLResponse:
+def _payment_page(
+    status: int, robot: str, message: str, title: str = "Card payment"
+) -> HTMLResponse:
     """A small inline page for the buyer — raw JSON is the wrong shape for a browser.
 
     ``robot`` is the raw path segment, and the 404 branches reach here for *any* value,
@@ -148,12 +178,76 @@ def _stripe_page(status: int, robot: str, message: str) -> HTMLResponse:
     """
     href = html.escape(f"/{quote(robot, safe='')}/ui", quote=True)
     body = (
-        '<!doctype html><html><head><meta charset="utf-8"><title>Card payment</title></head>'
+        '<!doctype html><html><head><meta charset="utf-8"><title>{html.escape(title)}</title></head>'
         f"<body><p>{html.escape(message)}</p>"
         f'<p><a href="{href}">Back to {html.escape(robot)}</a></p>'
         "</body></html>"
     )
     return HTMLResponse(body, status_code=status, headers={"Cache-Control": "no-store"})
+
+
+_stripe_page = _payment_page
+
+
+def _upi_page(status: int, robot: str, message: str) -> HTMLResponse:
+    return _payment_page(status, robot, message, title="UPI payment")
+
+
+def _razorpay_checkout_page(
+    robot: str, cfg, order_id: str, origin: str
+) -> HTMLResponse:
+    """The page ``start`` returns: loads checkout.js and opens Razorpay Checkout.
+
+    The options go into a ``<script>`` as JSON with ``<`` escaped, so nothing in them
+    (the operator's display name, the robot name) can close the tag early. No
+    ``redirect`` option: without it Checkout POSTs only *successes* to ``callback_url``.
+    The key id is public by design (Checkout needs it in the browser); the secret never
+    appears here.
+    """
+    minutes = cfg.lease_minutes
+    price = f"\u20b9{cfg.price_paise / 100:.2f}"
+    description = f"Drive {robot} for {minutes} min"
+    opts = {
+        "key": cfg.key_id,
+        "order_id": order_id,
+        "amount": cfg.price_paise,
+        "currency": "INR",
+        "name": cfg.display_name,
+        "description": description,
+        "callback_url": f"{origin}/{quote(robot, safe='')}/razorpay/confirm",
+    }
+    back = f"/{quote(robot, safe='')}/ui"
+
+    def js(value) -> str:
+        return json.dumps(value).replace("<", "\\u003c")
+
+    href = html.escape(back, quote=True)
+    body = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>UPI payment</title></head><body>"
+        f"<p>Pay {price} to drive {html.escape(robot)} for {minutes} min</p>"
+        f'<button id="pay">Pay {price}</button>'
+        '<p id="err" hidden></p>'
+        f'<p><a href="{href}">Back to {html.escape(robot)}</a></p>'
+        f'<script src="{html.escape(cfg.checkout_js, quote=True)}"></script>'
+        "<script>"
+        f"const opts = {js(opts)};"
+        f"const back = {js(back)};"
+        'const pay = document.getElementById("pay");'
+        'const err = document.getElementById("err");'
+        "opts.modal = {ondismiss: () => { location.href = back; }};"
+        'if (typeof Razorpay === "undefined") {'
+        'err.textContent = "Couldn\'t load the payment window. '
+        'Check your connection and reload."; err.hidden = false;'
+        "} else {"
+        "const rzp = new Razorpay(opts);"
+        "pay.onclick = () => rzp.open();"
+        "try { rzp.open(); } catch (e) {}"
+        "}"
+        "</script></body></html>"
+    )
+    return HTMLResponse(body, status_code=200, headers={"Cache-Control": "no-store"})
 
 
 def _ws_url(base_url: str, path: str, query: str) -> str:
@@ -449,6 +543,7 @@ def register_ws_proxy(
     payments,
     free,
     stripe,
+    razorpay,
 ) -> None:
     """Add ``/{robot}/ws/{path}`` to the gateway.
 
@@ -508,6 +603,14 @@ def register_ws_proxy(
     # a reconnect, not a replay. Pruned of expired entries on each confirm.
     confirmed_sessions: dict[str, tuple[str, int]] = {}
 
+    # The HMAC key for Razorpay credentials, derived from the operator's key secret.
+    razorpay_key = derive_razorpay_key(razorpay.key_secret) if razorpay.enabled else None
+
+    # Order id -> (robot, exp, payer): the same idempotency cache for Razorpay confirm,
+    # so a re-POST doesn't call Razorpay again. NOT a blocklist — re-presenting the same
+    # order is a reconnect, not a replay. Pruned of expired entries on each confirm.
+    confirmed_orders: dict[str, tuple[str, int, str]] = {}
+
     @app.websocket("/{robot}/ws/{path:path}")
     async def robot_ws_proxy(ws: WebSocket, robot: str, path: str):
         entry = proxied.get(robot)
@@ -535,8 +638,8 @@ def register_ws_proxy(
         release_client_id: str | None = None
         lease_key: tuple[str, str] | None = None
 
-        if payments.enabled or stripe.enabled:
-            # A paid gate — x402 capability, card-paid HMAC credential, or both — in
+        if payments.enabled or stripe.enabled or razorpay.enabled:
+            # A paid gate — x402 capability, card/UPI-paid HMAC credential, or any mix — in
             # order. Every branch below either admits (falling through to
             # gateway_auth = True) or refuses and returns.
             supplied = dict(parse_qsl(ws.url.query, keep_blank_values=True)).get("token", "")
@@ -572,6 +675,31 @@ def register_ws_proxy(
                     await _refuse(ws, 1008, str(exc))
                     return
                 holder = f"stripe:{claims.lease}"
+                if released_leases.get(holder, 0) > now:
+                    await _refuse(ws, 1008, "lease released")
+                    return
+                if not registry.reserve(robot, holder, ttl=claims.exp - now):
+                    await _refuse(ws, 1008, "robot is held by another session")
+                    return
+                expiry_at = claims.exp
+                lease_key = (robot, holder)
+            elif razorpay.enabled and is_razorpay_credential(supplied):
+                # UPI-paid: same as the card branch above — verified locally, never
+                # against Razorpay.
+                now = int(time.time())
+                try:
+                    claims = verify_razorpay(
+                        supplied,
+                        razorpay_key,
+                        robot=robot,
+                        gateway=_public_domain(ws),
+                        lease_minutes=razorpay.lease_minutes,
+                        now=now,
+                    )
+                except CapabilityError as exc:
+                    await _refuse(ws, 1008, str(exc))
+                    return
+                holder = f"razorpay:{claims.lease}"
                 if released_leases.get(holder, 0) > now:
                     await _refuse(ws, 1008, "lease released")
                     return
@@ -746,13 +874,14 @@ def register_ws_proxy(
 
     @app.post("/{robot}/lease/release")
     async def release_lease(request: Request, robot: str) -> dict:
-        """Voluntarily give up a lease before it expires — paid (x402 or card), or free.
+        """Voluntarily give up a lease before it expires — paid (x402, card or UPI), or free.
 
         Never refunds — for an x402 lease, settlement is a direct wallet-to-owner
         transfer with no escrow (paid-teleop-access.md §4.2), so there is no key
         anywhere that could claw money back; a card lease *could* be refunded through
         Stripe but v1 deliberately never does (refunds and disputes are the operator's
-        job in the Stripe dashboard); a free lease never took any money to begin with.
+        job in the Stripe dashboard), and a UPI lease is no different (the Razorpay
+        dashboard); a free lease never took any money to begin with.
         Either way this only frees the *robot* early: the reservation is released so the
         next person does not wait out someone else's unused time, and this session's own
         live sockets (if any) are force-closed so the page's "released" state and the
@@ -761,7 +890,12 @@ def register_ws_proxy(
         """
         if robot not in proxied:
             raise HTTPException(status_code=404, detail=f"no realtime socket for {robot!r}")
-        if not payments.enabled and not stripe.enabled and not free.enabled:
+        if (
+            not payments.enabled
+            and not stripe.enabled
+            and not razorpay.enabled
+            and not free.enabled
+        ):
             raise HTTPException(
                 status_code=404, detail="teleop reservations are not enabled on this gateway"
             )
@@ -792,6 +926,29 @@ def register_ws_proxy(
                     del released_leases[stale_holder]
             released_leases[holder] = claims.exp
             confirmed_sessions.pop(claims.lease, None)
+            registry.release(robot, holder)
+            await _force_close_lease_sockets(robot, holder)
+            return {"released": True}
+
+        if razorpay.enabled and is_razorpay_credential(token):
+            try:
+                claims = verify_razorpay(
+                    token,
+                    razorpay_key,
+                    robot=robot,
+                    gateway=_public_domain(request),
+                    lease_minutes=razorpay.lease_minutes,
+                    now=now,
+                )
+            except CapabilityError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            holder = f"razorpay:{claims.lease}"
+            for stale_holder, exp in list(released_leases.items()):
+                if exp <= now:
+                    del released_leases[stale_holder]
+            released_leases[holder] = claims.exp
+            confirmed_orders.pop(claims.lease, None)
             registry.release(robot, holder)
             await _force_close_lease_sockets(robot, holder)
             return {"released": True}
@@ -1048,6 +1205,251 @@ def register_ws_proxy(
             exp=exp,
         )
         credential = mint_stripe(claims, stripe_key)
+        return RedirectResponse(
+            f"/{robot}/ui#token={quote(credential)}",
+            status_code=303,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
+
+    @app.get("/{robot}/razorpay/start")
+    async def razorpay_start(robot: str, request: Request):
+        """Begin a UPI purchase: create a Razorpay Order and serve the Checkout page."""
+        if robot not in proxied or not razorpay.enabled:
+            return _upi_page(404, robot, "UPI payments are not enabled for this robot")
+        if registry.status(robot)["reserved"]:
+            # No buyer identity yet, so any hold blocks them — refuse before any money
+            # moves (decision A.9).
+            return _upi_page(409, robot, "this robot is currently in use")
+        if reachability.get(robot) is False:
+            return _upi_page(503, robot, "this robot is offline right now")
+
+        body = {
+            "amount": razorpay.price_paise,
+            "currency": "INR",
+            "receipt": f"{robot}-{int(time.time())}"[:40],
+            "notes": {"robot": robot, "gateway": _public_domain(request)},
+        }
+
+        import httpx
+
+        unavailable = "UPI payments are unavailable right now"
+        try:
+            async with httpx.AsyncClient(timeout=RAZORPAY_TIMEOUT_S) as client:
+                r = await client.post(
+                    f"{razorpay.api_base}/v1/orders",
+                    auth=_razorpay_auth(razorpay),
+                    json=body,
+                )
+        except httpx.HTTPError:
+            logger.warning("ws proxy: razorpay start for %s failed to reach Razorpay", robot)
+            return _upi_page(503, robot, unavailable)
+
+        if not 200 <= r.status_code < 300:
+            try:
+                error = r.json().get("error") or {}
+                reason = error.get("description") or error.get("code")
+            except (ValueError, AttributeError):
+                reason = None
+            logger.warning(
+                "ws proxy: razorpay start for %s returned %d: %s", robot, r.status_code, reason
+            )
+            return _upi_page(503, robot, unavailable)
+
+        try:
+            order_id = r.json()["id"]
+        except (ValueError, KeyError, TypeError):
+            order_id = None
+        if not isinstance(order_id, str) or not _RZP_ORDER_RE.match(order_id):
+            logger.warning("ws proxy: razorpay start for %s returned no valid order id", robot)
+            return _upi_page(503, robot, unavailable)
+
+        return _razorpay_checkout_page(robot, razorpay, order_id, _public_origin(request))
+
+    @app.post("/{robot}/razorpay/confirm")
+    async def razorpay_confirm(robot: str, request: Request):
+        """Checkout's callback_url target: verify the payment, reserve, hand back a credential.
+
+        A POST so the ids never appear in a URL. Parsed with ``parse_qs`` rather than
+        ``request.form()`` because python-multipart is not a declared dependency here.
+        """
+        if robot not in proxied or not razorpay.enabled:
+            return _upi_page(404, robot, "UPI payments are not enabled for this robot")
+
+        raw = await request.body()
+        if len(raw) > 4096:
+            return _upi_page(400, robot, "invalid payment response")
+        form = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
+
+        def field(name: str) -> str:
+            values = form.get(name) or [""]
+            return values[0]
+
+        order_id = field("razorpay_order_id")
+        payment_id = field("razorpay_payment_id")
+        sig = field("razorpay_signature")
+        # Before any Razorpay call — also blocks path injection into the fetch URLs.
+        if (
+            not _RZP_ORDER_RE.match(order_id)
+            or not _RZP_PAYMENT_RE.match(payment_id)
+            or not _RZP_SIGNATURE_RE.match(sig)
+        ):
+            return _upi_page(400, robot, "invalid payment response")
+
+        expected = hmac.new(
+            razorpay.key_secret.encode(),
+            f"{order_id}|{payment_id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return _upi_page(400, robot, "invalid payment signature")
+
+        now = int(time.time())
+
+        # Prune the idempotency cache of expired entries.
+        for oid, (_, cached_exp, _) in list(confirmed_orders.items()):
+            if cached_exp <= now:
+                del confirmed_orders[oid]
+
+        unavailable = "UPI payments are unavailable right now"
+        retry = "couldn't reach Razorpay; refresh to retry"
+
+        cached = confirmed_orders.get(order_id)
+        if cached is not None and cached[0] == robot and cached[1] > now:
+            _, exp, method = cached
+        else:
+            import httpx
+
+            async def fetch(path: str, unknown: str):
+                """GET a Razorpay entity -> (json, None) or (None, error page)."""
+                try:
+                    async with httpx.AsyncClient(timeout=RAZORPAY_TIMEOUT_S) as client:
+                        r = await client.get(
+                            f"{razorpay.api_base}{path}", auth=_razorpay_auth(razorpay)
+                        )
+                except httpx.HTTPError:
+                    return None, _upi_page(503, robot, retry)
+                if r.status_code >= 500:
+                    return None, _upi_page(503, robot, retry)
+                if r.status_code in (400, 404):
+                    return None, _upi_page(400, robot, unknown)
+                if r.status_code != 200:
+                    return None, _upi_page(502, robot, unavailable)
+                try:
+                    data = r.json()
+                except ValueError:
+                    return None, _upi_page(502, robot, unavailable)
+                if not isinstance(data, dict):
+                    return None, _upi_page(502, robot, unavailable)
+                return data, None
+
+            order, err = await fetch(f"/v1/orders/{order_id}", "unknown order")
+            if err is not None:
+                return err
+
+            if order.get("status") != "paid":
+                return _upi_page(402, robot, "payment not complete")
+
+            mismatch = (
+                "payment does not match this gateway's price; "
+                "contact the operator for a refund"
+            )
+            if (
+                order.get("amount_paid") != razorpay.price_paise
+                or order.get("currency") != "INR"
+            ):
+                logger.warning(
+                    "ws proxy: razorpay payment mismatch for %s (amount=%r currency=%r)",
+                    robot,
+                    order.get("amount_paid"),
+                    order.get("currency"),
+                )
+                return _upi_page(409, robot, mismatch)
+
+            notes = order.get("notes")
+            if not isinstance(notes, dict):
+                notes = {}
+            if notes.get("robot") != robot:
+                return _upi_page(400, robot, "order is for another robot")
+            # One Razorpay account can back several gateways serving same-named robots;
+            # without this, one payment would confirm on each of them.
+            if not isinstance(notes.get("gateway"), str) or normalize_host(
+                notes["gateway"]
+            ) != normalize_host(_public_domain(request)):
+                return _upi_page(400, robot, "order is for another gateway")
+
+            payment, err = await fetch(f"/v1/payments/{payment_id}", "unknown payment")
+            if err is not None:
+                return err
+
+            if payment.get("order_id") != order_id:
+                return _upi_page(400, robot, "payment is for another order")
+            status = payment.get("status")
+            if status == "authorized":
+                logger.warning(
+                    "ws proxy: razorpay payment for %s is authorized, not captured; "
+                    "enable automatic capture in the Razorpay dashboard",
+                    robot,
+                )
+                return _upi_page(
+                    402,
+                    robot,
+                    "payment authorized but not captured; "
+                    "the operator must enable automatic capture",
+                )
+            if status != "captured":
+                return _upi_page(402, robot, "payment not complete")
+            if payment.get("amount") != razorpay.price_paise:
+                logger.warning(
+                    "ws proxy: razorpay payment mismatch for %s (amount=%r)",
+                    robot,
+                    payment.get("amount"),
+                )
+                return _upi_page(409, robot, mismatch)
+
+            created = payment.get("created_at")
+            method = payment.get("method")
+            if (
+                not isinstance(created, int)
+                or isinstance(created, bool)
+                or not isinstance(method, str)
+                or not method
+            ):
+                return _upi_page(502, robot, unavailable)
+
+            # min() guards against Razorpay's clock running ahead of this host's clock,
+            # which would otherwise make exp - iat exceed the lease and fail verify()'s
+            # duration check.
+            exp = min(created, now) + razorpay.lease_minutes * SECONDS_PER_LEASE_MINUTE
+            if exp <= now:
+                return _upi_page(409, robot, "lease expired")
+
+            holder = f"razorpay:{order_id}"
+            if released_leases.get(holder, 0) > now:
+                return _upi_page(409, robot, "lease released")
+
+            if not registry.reserve(robot, holder, ttl=exp - now):
+                # Decision A.9: still issue the credential — the console retries "robot
+                # is held by another session" every 5s. Log the robot and the id's tail,
+                # never the full order id.
+                logger.info(
+                    "ws proxy: razorpay confirm for %s lost the reserve race (…%s)",
+                    robot,
+                    order_id[-6:],
+                )
+
+            confirmed_orders[order_id] = (robot, exp, method)
+
+        claims = RazorpayClaims(
+            v=1,
+            kind="razorpay",
+            robot=robot,
+            gateway=_public_domain(request),
+            lease=order_id,
+            payer=method,
+            iat=now,
+            exp=exp,
+        )
+        credential = mint_razorpay(claims, razorpay_key)
         return RedirectResponse(
             f"/{robot}/ui#token={quote(credential)}",
             status_code=303,
