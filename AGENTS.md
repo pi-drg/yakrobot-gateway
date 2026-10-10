@@ -49,7 +49,7 @@ yakrobot-gateway/
 │   │   ├── descriptor.py  # build_descriptor: plugin metadata → RobotDescriptor (export extra)
 │   │   └── descriptor_route.py # /{robot}/descriptor — the same JSON, served live + CORS
 │   └── plugins/           # One sub-package per robot (device-neutral; IoT/printers later)
-│       ├── tumbller/  tello/  fakerobot/  picar_freenove/  fakerobot_picar/  _template/
+│       ├── tumbller/  tello/  fakerobot/  picar_freenove/  picar_adeept/  fakerobot_picar/  _template/
 └── scripts/               # serve.py + export_descriptor.py (emits the JSON contract)
 ```
 
@@ -141,6 +141,7 @@ to the same implementation in `src/yakrobot_cli/commands.py` (one source of trut
 uv sync                        # Core only (includes the yakrobot-py CLI)
 uv sync --extra tumbller       # With Tumbller support
 uv sync --extra picar-freenove # With Freenove 4WD PiCar support
+uv sync --extra picar-adeept   # With Adeept AWR-V3 PiCar support
 uv sync --extra fakerobot      # With fake robot (no hardware needed)
 uv sync --extra all            # All robots
 
@@ -158,6 +159,7 @@ uv run yakrobot-py serve --robots fakerobot                # Gateway for fake ro
 
 # Browser teleop — the console is at /{robot}/ui on the serving gateway
 uv run yakrobot-py serve --robots picar_freenove           # → :8000/picar_freenove/ui
+uv run yakrobot-py serve --robots picar_adeept             # → :8000/picar_adeept/ui
 uv run yakrobot-py sim --robot fakerobot_picar             # Simulated car on :8081 (with sockets)
 uv run yakrobot-py serve --robots fakerobot_picar          # ...its gateway → :8000/fakerobot_picar/ui
 
@@ -203,6 +205,10 @@ Serving:
   (mDNS name, IP, …) tried in order, because neither naming scheme is reliable alone.
   `PICAR_FREENOVE_TOKEN` — bearer token, only if the car runs with `ROBOT_TOKEN` set;
   omit when the robot has auth disabled.
+- `PICAR_ADEEPT_URL` / `PICAR_ADEEPT_TOKEN` — the same pair for the Adeept AWR-V3 car
+  (`picar_adeept_fastapi`), default `http://picar-adeept.local:8080`. Its server mirrors
+  the Freenove contract, so the console and `/ws/*` proxy work unchanged; the MCP tools
+  drop what the hardware lacks (no strafe, no pan, no `scan`) and add `picar_adeept_beep`.
 - `VIDEO_ENABLED` — (optional) set `0`/`false`/`no`/`off` to refuse `/ws/video` for every
   client, for a metered or congested link. Control keeps working: the car stays drivable,
   just blind. Absent means enabled.

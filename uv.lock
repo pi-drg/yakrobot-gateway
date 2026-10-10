@@ -1694,6 +1694,9 @@ payments = [
     { name = "eth-keys" },
     { name = "httpx" },
 ]
+picar-adeept = [
+    { name = "httpx" },
+]
 picar-freenove = [
     { name = "httpx" },
 ]
@@ -1724,6 +1727,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'fakerobot'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'fakerobot-picar'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'payments'", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'picar-adeept'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'picar-freenove'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'stripe'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'tumbller'", specifier = ">=0.28.1" },
@@ -1742,4 +1746,4 @@ requires-dist = [
     { name = "yakrobot-descriptor", extras = ["model"], marker = "extra == 'dev'", editable = "../yakrobot-descriptor" },
     { name = "yakrobot-descriptor", extras = ["model"], marker = "extra == 'export'", editable = "../yakrobot-descriptor" },
 ]
-provides-extras = ["tumbller", "picar-freenove", "tello", "fakerobot", "fakerobot-picar", "export", "payments", "stripe", "all", "dev"]
+provides-extras = ["tumbller", "picar-freenove", "picar-adeept", "tello", "fakerobot", "fakerobot-picar", "export", "payments", "stripe", "all", "dev"]
