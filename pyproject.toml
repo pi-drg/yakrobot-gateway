@@ -71,4 +71,4 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.uv.sources]
-yakrobot-descriptor = { path = "../yakrobot-descriptor", editable = true }
+yakrobot-descriptor = { git = "https://github.com/pi-drg/yakrobot-descriptor", tag = "v0.1.0" }
