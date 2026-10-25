@@ -46,7 +46,7 @@ def start_tunnel(port: int = 8000, provider: str | None = None) -> str:
 
 def _start_ngrok(port: int) -> str:
     """Open an ngrok tunnel on a static domain. Needs NGROK_AUTHTOKEN + NGROK_DOMAIN."""
-    from pyngrok import ngrok
+    from pyngrok import conf, ngrok
 
     auth_token = os.getenv("NGROK_AUTHTOKEN")
     domain = os.getenv("NGROK_DOMAIN")
@@ -57,8 +57,11 @@ def _start_ngrok(port: int) -> str:
             "NGROK_DOMAIN not set in .env (claim at https://dashboard.ngrok.com/domains)"
         )
 
-    ngrok.set_auth_token(auth_token)
-    ngrok.connect(addr=str(port), proto="http", hostname=domain)
+    # Hand the token to this ngrok process only (pyngrok passes it as --authtoken),
+    # rather than ngrok.set_auth_token(), which writes it into ngrok.yml: ngrok 3.39+
+    # refuses to overwrite a saved token, so every start after the first failed.
+    ngrok.connect(addr=str(port), proto="http", hostname=domain,
+                  pyngrok_config=conf.PyngrokConfig(auth_token=auth_token))
     return f"https://{domain}"
 
 
