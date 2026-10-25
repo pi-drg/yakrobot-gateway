@@ -1,9 +1,9 @@
 """PiCar Adeept — Adeept AWR-V3 4WD car on a Raspberry Pi, over MCP.
 
 The car runs `picar_adeept_fastapi` (github.com/pi-drg/picar_adeept_fastapi),
-which serves the same HTTP control surface as the Freenove car. This plugin
-adapts it to MCP tools, minus what the hardware lacks (pan, scan, strafe) and
-plus the buzzer.
+which exposes an HTTP control surface on the Pi itself. This plugin adapts that
+surface to MCP tools, leaving out what the hardware lacks (pan, scan, strafe).
+The plugin is self-contained: it shares no code with other robot plugins.
 
 Point it at your car with `PICAR_ADEEPT_URL` (default `http://127.0.0.1:8080`,
 for a gateway on the car's own Pi), and set `PICAR_ADEEPT_TOKEN` to the robot's
@@ -31,8 +31,10 @@ class PicarAdeeptPlugin(RobotPlugin):
             ),
             robot_type="mobile_robot",
             url_prefix="picar_adeept",
-            # Fleet identity is assigned by whoever registers the robot on-chain,
-            # not claimed here — see the picar_freenove plugin.
+            # Fleet identity is assigned by whoever registers the robot on-chain, not
+            # claimed here — a gateway cannot verify whose fleet it belongs to. Left
+            # empty so the descriptor carries no unverified claim; the registrar fills
+            # it in.
             fleet_provider="",
             fleet_domain="",
             # Not participating in the task marketplace — a commercial decision,
