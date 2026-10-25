@@ -1,12 +1,12 @@
 """MCP-facing adapter: tool names, signatures and validation.
 
-Every handler delegates to PicarAdeeptAdapter. The tool set is the Freenove
-car's minus what this hardware lacks (pan, scan, strafe) plus the buzzer, so an
-agent is never offered a tool that can only fail.
+Every handler delegates to PicarAdeeptAdapter. Tools exist only for what this
+hardware can do — no pan, scan or strafe — so an agent is never offered a tool
+that can only fail.
 
-Duty notes are deliberately vaguer than Freenove's: this car's stall floor has
-not been measured yet (see picar_adeept_fastapi's AGENTS.md). The robot's own
-default of 1600 is the starting point.
+Duty guidance is deliberately vague: this car's stall floor has not been
+measured yet (see picar_adeept_fastapi's AGENTS.md). The robot's own default of
+1600 is the starting point.
 """
 
 from typing import Literal

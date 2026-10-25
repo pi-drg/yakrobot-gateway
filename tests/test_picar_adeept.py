@@ -1,8 +1,8 @@
 """Offline tests for the picar_adeept plugin (mock HTTP transport, no car).
 
-Pins what differs from the Freenove car on the wire: tilt-only /look, vy forced
-to 0, the buzzer payload — and that the tool set never offers pan, scan or
-strafe, which this hardware cannot do.
+Pins what this car's wire format depends on: tilt-only /look, vy forced to 0,
+the buzzer payload, the duration clamp — and that the tool set never offers
+pan, scan or strafe, which this hardware cannot do.
 """
 
 import asyncio
@@ -25,6 +25,19 @@ def _adapter_with_log():
     adapter.client = httpx.AsyncClient(
         base_url="http://car", transport=httpx.MockTransport(handler))
     return adapter, sent
+
+
+def test_plugin_imports_no_other_robot_plugin():
+    from pathlib import Path
+
+    from plugins import discover_plugins
+
+    others = set(discover_plugins()) - {"picar_adeept"}
+    pkg = Path(__file__).resolve().parent.parent / "src" / "plugins" / "picar_adeept"
+    for p in pkg.rglob("*.py"):
+        text = p.read_text()
+        for name in others:
+            assert f"plugins.{name}" not in text, f"{p.name} imports plugins.{name}"
 
 
 def test_plugin_is_discovered_with_matching_prefix():
