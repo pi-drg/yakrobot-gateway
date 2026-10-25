@@ -682,12 +682,16 @@
   function derive() {
     const on = intents();
     let vx = 0, vy = 0, om = 0;
-    if (on.has("fwd")) vx += 1200;
-    if (on.has("back")) vx -= 1200;
+    // Full-slider duties. Sized for the Adeept AWR (2026-10-25): it struggled on
+    // carpet, so straight runs use the motor maximum (that car's unit.json raises
+    // its max_duty to 4095) and spins 3000 — twitchy on a hard floor, where the
+    // speed slider takes them down. A robot's max_duty still caps them.
+    if (on.has("fwd")) vx += 4095;
+    if (on.has("back")) vx -= 4095;
     if (on.has("strafeL")) vy += 1400;
     if (on.has("strafeR")) vy -= 1400;
-    if (on.has("spinL")) om += 900;
-    if (on.has("spinR")) om -= 900;
+    if (on.has("spinL")) om += 3000;
+    if (on.has("spinR")) om -= 3000;
     if (on.has("diagFL")) { vx += 1000; vy += 1000; }
     if (on.has("diagFR")) { vx += 1000; vy -= 1000; }
     if (on.has("diagBL")) { vx -= 1000; vy += 1000; }
