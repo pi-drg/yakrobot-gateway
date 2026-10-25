@@ -116,6 +116,9 @@ the robot needs no public address of its own.
 ```bash
 uv sync --extra picar-freenove
 uv run yakrobot-py serve --robots picar_freenove    # then open localhost:8000/picar_freenove/ui
+# or, for the Adeept AWR-V3 car:
+uv sync --extra picar-adeept
+uv run yakrobot-py serve --robots picar_adeept      # then open localhost:8000/picar_adeept/ui
 ```
 
 Hardware-free, in two terminals — the simulator serves the same sockets a real
@@ -191,6 +194,7 @@ callers apart) or `MCP_BEARER_TOKEN` (single shared token).
 Optional: `TUMBLLER_URL`, `TELLO_HOST`, `FAKEROBOT_URL`, `FAKEROBOT_PICAR_URL`.
 `PICAR_FREENOVE_URL` takes a comma-separated candidate list (mDNS name, IP, …) — the
 first that answers wins; `PICAR_FREENOVE_TOKEN` only if the car runs with auth on.
+`PICAR_ADEEPT_URL` / `PICAR_ADEEPT_TOKEN` are the same pair for the Adeept car.
 Teleop: `VIDEO_ENABLED=0` refuses `/ws/video` for every client.
 No chain secrets live in any of these repos: registration and attestation are signed by a
 browser wallet, and `yakrobot-identity` is read-only. Payment/marketplace secrets live in
