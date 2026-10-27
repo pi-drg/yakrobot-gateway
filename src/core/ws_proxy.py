@@ -550,8 +550,8 @@ def register_ws_proxy(
             return refuse(400, "bad capture: the signature is not the player's")
         if capture.chain_id != capture_flag.chain_id or capture.contract != capture_flag.contract:
             return refuse(400, "bad capture: wrong chain or contract for this gateway")
-        host = normalize_host(_public_domain(request))
-        if capture.robot_id != robot_id_for(host, robot):
+        # From configuration only: the Host header is the caller's to choose.
+        if capture.robot_id != robot_id_for(capture_flag.public_host, robot):
             return refuse(400, "bad capture: it is for another robot")
 
         # 2. The capture's time, on-chain.

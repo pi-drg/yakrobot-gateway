@@ -50,6 +50,7 @@ def _set(monkeypatch, **env):
         "TELEOP_CAPTURE_FLAG_ENABLED", "TELEOP_CAPTURE_FLAG_CONTRACT",
         "TELEOP_CAPTURE_FLAG_CHAIN_ID", "TELEOP_CAPTURE_FLAG_RPC_URL",
         "TELEOP_CAPTURE_FLAG_VALID_MINUTES", "TELEOP_CAPTURE_FLAG_CLAIM_URL",
+        "NGROK_DOMAIN", "CLOUDFLARE_DOMAIN",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
@@ -423,6 +424,7 @@ VALID_FLAG = {
     "TELEOP_CAPTURE_FLAG_CHAIN_ID": "84532",
     "TELEOP_CAPTURE_FLAG_RPC_URL": "https://sepolia.base.org",
     "TELEOP_CAPTURE_FLAG_CLAIM_URL": "https://capture-flag.yakrobot.com/r/india",
+    "NGROK_DOMAIN": "Robot.Example.ngrok.app",
 }
 OFF = (PaymentsConfig(enabled=False), StripeConfig(enabled=False))
 
@@ -443,6 +445,7 @@ def test_capture_flag_valid(monkeypatch):
         valid_minutes=30,
         claim_url="https://capture-flag.yakrobot.com/r/india",
         lease_minutes=5,
+        public_host="robot.example.ngrok.app",
     )
     assert "sepolia.base.org" not in repr(cfg)
 
@@ -493,6 +496,15 @@ def test_capture_flag_rejects(monkeypatch, name, value):
     _set(monkeypatch, **{**VALID_FLAG, name: value})
     with pytest.raises(PaymentsConfigError, match=name):
         load_capture_flag_config(*OFF)
+
+
+def test_capture_flag_requires_a_public_domain(monkeypatch):
+    env = {k: v for k, v in VALID_FLAG.items() if k != "NGROK_DOMAIN"}
+    _set(monkeypatch, **env)
+    with pytest.raises(PaymentsConfigError, match="NGROK_DOMAIN or CLOUDFLARE_DOMAIN"):
+        load_capture_flag_config(*OFF)
+    _set(monkeypatch, **env, CLOUDFLARE_DOMAIN="robots.example.org")
+    assert load_capture_flag_config(*OFF).public_host == "robots.example.org"
 
 
 def test_capture_flag_rpc_url_never_echoed(monkeypatch):

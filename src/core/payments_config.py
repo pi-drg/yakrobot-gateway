@@ -87,6 +87,8 @@ class CaptureFlagConfig:
     valid_minutes: int | None = None
     claim_url: str | None = None
     lease_minutes: int | None = None
+    # This gateway's public host, normalized: the robot id is keccak(public_host/robot).
+    public_host: str | None = None
 
 
 def _enabled() -> bool:
@@ -263,7 +265,13 @@ def load_capture_flag_config(
     without reading anything else. When on, it needs free mode: either paid gate being on
     too is an error, not a silent precedence. The ride length is the shared
     ``TELEOP_LEASE_MINUTES``.
+
+    It also needs the public domain (``NGROK_DOMAIN`` or ``CLOUDFLARE_DOMAIN``): the robot
+    id a capture names is derived from it, and never from a request's ``Host`` header,
+    which the caller controls.
     """
+    from core.capability import normalize_host
+
     flag = "TELEOP_CAPTURE_FLAG_ENABLED"
     if os.getenv(flag, "").strip().lower() not in _TRUTHY:
         return CaptureFlagConfig(enabled=False)
@@ -293,8 +301,16 @@ def load_capture_flag_config(
         "TELEOP_CAPTURE_FLAG_CLAIM_URL", _require("TELEOP_CAPTURE_FLAG_CLAIM_URL", flag=flag)
     )
 
+    domain = os.getenv("NGROK_DOMAIN", "").strip() or os.getenv("CLOUDFLARE_DOMAIN", "").strip()
+    if not domain:
+        raise PaymentsConfigError(
+            f"{flag} needs the gateway's fixed public domain: set NGROK_DOMAIN or "
+            "CLOUDFLARE_DOMAIN"
+        )
+
     return CaptureFlagConfig(
         enabled=True,
+        public_host=normalize_host(domain),
         contract=contract,
         chain_id=int(chain_raw),
         rpc_url=rpc_url,

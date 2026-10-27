@@ -1664,6 +1664,7 @@ def test_index_reports_stripe():
 
 CF_CONTRACT = "0xf3f2e69a1b00577d5d6ca1911a3a80132cd08737"
 CF_CLAIM_URL = "https://capture-flag.test/r/india"
+CF_PUBLIC_HOST = "robot.example.ngrok.app"
 RESERVE_URL = f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve"
 RELEASE_URL = f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release"
 
@@ -1690,6 +1691,7 @@ class _FakeRpcNode:
             TELEOP_CAPTURE_FLAG_CHAIN_ID="84532",
             TELEOP_CAPTURE_FLAG_RPC_URL=f"http://127.0.0.1:{self.port}/",
             TELEOP_CAPTURE_FLAG_CLAIM_URL=CF_CLAIM_URL,
+            NGROK_DOMAIN=CF_PUBLIC_HOST,
         )
         env.update(overrides)
         return env
@@ -1704,7 +1706,7 @@ class _Player:
         self.key = keys.PrivateKey(os.urandom(32))
         self.address = self.key.public_key.to_checksum_address().lower()
 
-    def robot_id(self, host=f"127.0.0.1:{GW_PORT}", robot="fakerobot_picar") -> str:
+    def robot_id(self, host=CF_PUBLIC_HOST, robot="fakerobot_picar") -> str:
         from core.eth_sig import robot_id_for
 
         return robot_id_for(host, robot)
@@ -1801,6 +1803,8 @@ def test_capture_flag_bad_captures_are_400_and_change_nothing():
             bad = {
                 "another robot": player.capture(robot_id=player.robot_id(robot="picar_freenove")),
                 "another gateway": player.capture(robot_id=player.robot_id(host="other.example")),
+                # The robot id this gateway would get from the Host header, not its domain.
+                "the request's host": player.capture(robot_id=player.robot_id(host=f"127.0.0.1:{GW_PORT}")),
                 "another chain": player.capture(chain_id=8453),
                 "another contract": player.capture(contract="0x" + "33" * 20),
                 "someone else's signature": player.capture(signer=keys.PrivateKey(os.urandom(32))),
