@@ -158,6 +158,7 @@
   .paywall-reason { color: var(--accent); font-size: 13px; margin: 0 0 10px; }
   .paywall-price { color: var(--ink-secondary); font-size: 15px; margin: 0 0 18px; }
   .paywall-card a.stop { display: inline-flex; text-decoration: none; }
+  .paywall-card a.stop[hidden] { display: none; }
   .paywall-card a.stop[aria-disabled="true"] {
     background: var(--surface-muted); color: var(--ink-secondary); cursor: not-allowed;
     pointer-events: none;
@@ -851,6 +852,16 @@
   // on the tab staying open, so closing and reopening the console shouldn't make a
   // driver look like a stranger to their own reservation.
   const FREE_STORAGE_KEY = robotName ? "yakrobot.freelease." + robotName : null;
+  // Capture-flag mode: the visitor's signed capture {c, s, k, at}, handed off from the
+  // capture-flag page in the URL hash. localStorage, like a free lease: it's proof of a
+  // capture the visitor already made, good for VALID_MINUTES, and a reload or a busy
+  // robot must not make them capture again. `k` is the ride secret: the signed nonce is
+  // sha256(k), and k is never on-chain, so it is what makes this capture theirs.
+  const CAPTURE_STORAGE_KEY = robotName ? "yakrobot.capture." + robotName : null;
+  // How long the console keeps retrying a busy robot with a saved capture; the gateway
+  // has the real rule (TELEOP_CAPTURE_FLAG_VALID_MINUTES) and refuses past it.
+  const CAPTURE_RETRY_MS = 30 * 60 * 1000;
+  const isFreeLike = r => r === "free" || r === "capture_flag";
 
   // Teleop-gate decisions, logged so a stuck paywall can be diagnosed from DevTools
   // (with "Preserve log" on, the trail survives the payment redirect and reloads).
@@ -874,17 +885,23 @@
   let paywalled = false;
   let refused = false;     // idempotent guard: both sockets can 1008 the same reason
   let countdownTimer = null;
+  let captureHandedOff = false;  // this load arrived from the capture-flag page
+  let captureRetryTimer = null;
+
+  // Unpadded base64url → JSON, as both lease tokens and the capture hand-off carry it.
+  function decodeB64urlJson(text) {
+    let b64 = text.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
 
   // Decode only — verification is the gateway's job (core/capability.py). Null on
   // any malformed token or one already expired, so the caller can tell "no usable
   // capability" from "a broken one" without repeating this parsing.
   function decodeCapabilityToken(token) {
     try {
-      const payload = token.split(".")[0];
-      let b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
-      while (b64.length % 4) b64 += "=";
-      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-      const claims = JSON.parse(new TextDecoder().decode(bytes));
+      const claims = decodeB64urlJson(token.split(".")[0]);
       if (typeof claims.lease !== "string" || typeof claims.exp !== "number") return null;
       if (claims.exp * 1000 <= Date.now()) return null;
       return claims;
@@ -902,6 +919,16 @@
     return { token: stored, claims };
   }
 
+  function loadStoredCapture() {
+    if (!CAPTURE_STORAGE_KEY) return null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(CAPTURE_STORAGE_KEY) || "null");
+      if (saved && saved.c && saved.s && saved.k && Date.now() - saved.at < CAPTURE_RETRY_MS) return saved;
+    } catch {}
+    localStorage.removeItem(CAPTURE_STORAGE_KEY);
+    return null;
+  }
+
   function loadStoredFreeLease() {
     if (!FREE_STORAGE_KEY) return null;
     const stored = localStorage.getItem(FREE_STORAGE_KEY);
@@ -916,14 +943,14 @@
   const BLOCK_EXPLORERS = { 84532: "https://sepolia.basescan.org", 8453: "https://basescan.org" };
   const TX_STORAGE_KEY = robotName ? "yakrobot.tx." + robotName : null;
 
-  function renderTxLink(tx, chainId) {
+  function renderTxLink(tx, chainId, label = "Payment") {
     const base = BLOCK_EXPLORERS[chainId];
     if (!tx || !base) { els.txLink.hidden = true; return; }
     els.txLink.href = `${base}/tx/${tx}`;
     els.txLink.target = "_blank";
     els.txLink.rel = "noopener";
     els.txLink.title = tx;
-    els.txLinkAnchor.textContent = `Payment ${tx.slice(0, 6)}…${tx.slice(-4)} ↗`;
+    els.txLinkAnchor.textContent = `${label} ${tx.slice(0, 6)}…${tx.slice(-4)} ↗`;
     els.txLink.hidden = false;
   }
 
@@ -934,6 +961,26 @@
   if (!staticToken) {
     const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
     const hashToken = hashParams.get("token");
+    // Capture-flag hand-off: #c=<b64url typedData>&s=<sig>&k=<ride secret>&tx=<capture tx>.
+    const hashCapture = hashParams.get("c");
+    if (hashCapture && hashParams.get("s") && hashParams.get("k") && CAPTURE_STORAGE_KEY) {
+      try {
+        const c = decodeB64urlJson(hashCapture);
+        localStorage.setItem(CAPTURE_STORAGE_KEY, JSON.stringify({
+          c, s: hashParams.get("s"), k: hashParams.get("k"), at: Date.now(),
+        }));
+        const tx = hashParams.get("tx");
+        if (tx && TX_STORAGE_KEY) {
+          sessionStorage.setItem(TX_STORAGE_KEY, JSON.stringify({ tx, chainId: Number(c?.domain?.chainId), label: "Capture" }));
+        }
+        // A new capture replaces any lease left from an earlier ride.
+        localStorage.removeItem(FREE_STORAGE_KEY);
+        captureHandedOff = true;
+      } catch {
+        teleopLog("capture hand-off unreadable");
+      }
+      history.replaceState(null, "", location.pathname + location.search);
+    }
     if (hashToken) {
       if (STORAGE_KEY) sessionStorage.setItem(STORAGE_KEY, hashToken);
       const tx = hashParams.get("tx"), chainId = Number(hashParams.get("chain"));
@@ -957,7 +1004,7 @@
     if (TX_STORAGE_KEY) {
       try {
         const stored = JSON.parse(sessionStorage.getItem(TX_STORAGE_KEY) || "null");
-        if (stored) renderTxLink(stored.tx, stored.chainId);
+        if (stored) renderTxLink(stored.tx, stored.chainId, stored.label);
       } catch {
         sessionStorage.removeItem(TX_STORAGE_KEY);
       }
@@ -1000,7 +1047,8 @@
     // self-exclusion check: any reservation at all means someone else has it.
     const reservation = latestIndex?.robots?.[robotName]?.reservation;
     const heldByOther = !!reservation?.reserved;
-    const isFree = teleop.reservation === "free";
+    const isFree = isFreeLike(teleop.reservation);
+    const isCapture = teleop.reservation === "capture_flag";
 
     const priceParts = [];
     if (payments.teleop) priceParts.push(`${payments.teleop.price_usdc} USDC`);
@@ -1010,19 +1058,39 @@
       priceParts.push(`${label} by card`);
     }
 
-    els.paywallHeading.textContent = isFree ? "Reserve to drive" : "Pay to drive";
-    els.paywallPrice.textContent = isFree
+    els.paywallHeading.textContent = isCapture
+      ? "Capture to drive"
+      : isFree ? "Reserve to drive" : "Pay to drive";
+    els.paywallPrice.textContent = isCapture
+      ? (teleop.lease_minutes ? `Free — one ${teleop.lease_minutes} min ride per capture` : "")
+      : isFree
       ? (teleop.lease_minutes ? `Free — ${teleop.lease_minutes} min per turn` : "")
       : priceParts.length
       ? `${priceParts.join(" · ")} for ${teleop.lease_minutes ?? "?"} min`
       : "";
+
+    if (isCapture && !loadStoredCapture()) {
+      // Nothing to drive with yet: the capture happens on the capture-flag page.
+      if (teleop.claim_url) {
+        els.paywallLink.href = teleop.claim_url;
+        els.paywallLink.removeAttribute("aria-disabled");
+      } else {
+        els.paywallLink.removeAttribute("href");
+        els.paywallLink.setAttribute("aria-disabled", "true");
+      }
+      els.paywallLink.textContent = "Capture this robot first";
+      els.paywallCardLink.hidden = true;
+      return;
+    }
 
     if (isFree) {
       // No href here — the click handler below does a plain fetch, there is no
       // third-party page to navigate to.
       els.paywallLink.removeAttribute("href");
       if (online && !heldByOther) {
-        els.paywallLink.textContent = `Reserve for ${teleop.lease_minutes ?? "?"} min`;
+        els.paywallLink.textContent = isCapture
+          ? `Drive now (${teleop.lease_minutes ?? "?"} min)`
+          : `Reserve for ${teleop.lease_minutes ?? "?"} min`;
         els.paywallLink.removeAttribute("aria-disabled");
       } else {
         els.paywallLink.textContent = !online ? "Robot is offline" : "Robot is in use";
@@ -1169,9 +1237,14 @@
     // whatever token is on hand — today's behaviour — rather than guessing at a
     // dead screen; if a gate really is on, the server's own 1008 refusal reaches
     // the same paywall via onLeaseRefused.
-    const gated = payments.enabled || stripe.enabled || teleop.reservation === "free";
+    const gated = payments.enabled || stripe.enabled || isFreeLike(teleop.reservation);
     teleopLog("bootstrap", { indexLoaded: !!index, gated, staticToken: !!staticToken, hasCapability: !!capability });
-    if (index && gated && !staticToken && !capability) {
+    if (index && teleop.reservation === "capture_flag" && !staticToken && !capability
+        && (captureHandedOff || loadStoredCapture())) {
+      // Straight from the capture page, or back with a saved capture: drive with it.
+      showPaywall(null);
+      reserveAndConnect();
+    } else if (index && gated && !staticToken && !capability) {
       showPaywall(null);
     } else {
       hidePaywall();
@@ -1186,17 +1259,40 @@
   // Grants a free, timed turn — no payment, no third-party page. Mirrors what the
   // paid path's redirect does after settlement: store the token, admit both sockets.
   async function reserveAndConnect() {
+    if (captureRetryTimer) { clearTimeout(captureRetryTimer); captureRetryTimer = null; }
+    const isCapture = teleop.reservation === "capture_flag";
+    const saved = isCapture ? loadStoredCapture() : null;
+    if (isCapture && !saved) { showPaywall(null); return; }
+
     els.paywallLink.setAttribute("aria-disabled", "true");
     const previousText = els.paywallLink.textContent;
     els.paywallLink.textContent = "Reserving…";
     let body = null;
     try {
-      const res = await fetch(base + "/lease/reserve", { method: "POST" });
+      const init = { method: "POST" };
+      if (saved) {
+        init.headers = { "content-type": "application/json" };
+        init.body = JSON.stringify({ c: saved.c, s: saved.s, k: saved.k });
+      }
+      const res = await fetch(base + "/lease/reserve", init);
       body = await res.json().catch(() => null);
       if (!res.ok) {
         if (body?.reservation) paintReservationBanner(body.reservation);
         els.paywallReason.hidden = false;
         els.paywallReason.textContent = body?.detail || "could not reserve";
+        if (isCapture && res.status === 409) {
+          // Someone else is driving. The capture wasn't used, so wait and try again.
+          const freeAt = Date.now() + (body?.reservation?.expires_in ?? 15) * 1000;
+          const when = new Date(freeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          els.paywallReason.textContent = `Someone else is driving until about ${when}. Your capture is saved; trying again every 15 s.`;
+          captureRetryTimer = setTimeout(reserveAndConnect, 15000);
+        } else if (isCapture && res.status === 403) {
+          // Spent or too old: this capture won't work again. Back to the claim page.
+          localStorage.removeItem(CAPTURE_STORAGE_KEY);
+          showPaywall(body?.detail || "capture this robot again");
+        } else if (isCapture && res.status === 503) {
+          captureRetryTimer = setTimeout(reserveAndConnect, 15000);
+        }
         return;
       }
     } catch {
@@ -1221,7 +1317,8 @@
 
   els.paywallLink.addEventListener("click", e => {
     if (els.paywallLink.getAttribute("aria-disabled") === "true") { e.preventDefault(); return; }
-    if (teleop.reservation === "free") {
+    // In capture-flag mode with no saved capture, the link is the claim page: let it navigate.
+    if (teleop.reservation === "free" || (teleop.reservation === "capture_flag" && loadStoredCapture())) {
       e.preventDefault();
       reserveAndConnect();
     }
