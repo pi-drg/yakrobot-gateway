@@ -181,6 +181,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     from core.payments_config import (
         PaymentsConfigError,
         index_summary,
+        load_capture_flag_config,
         load_free_teleop_config,
         load_payments_config,
         load_stripe_config,
@@ -209,6 +210,15 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                 "STRIPE_GATE_ENABLED=1 needs: uv sync --extra stripe"
             ) from None
     free_teleop_cfg = load_free_teleop_config(payments_cfg, stripe_cfg)
+    capture_flag_cfg = load_capture_flag_config(payments_cfg, stripe_cfg)
+    if capture_flag_cfg.enabled:
+        try:
+            import eth_keys  # noqa: F401
+            import httpx  # noqa: F401
+        except ImportError:
+            raise PaymentsConfigError(
+                "TELEOP_CAPTURE_FLAG_ENABLED=1 needs: uv sync --extra capture-flag"
+            ) from None
 
     registry = ReservationRegistry()  # shared across every robot server + the index
     reachability = Reachability()  # shared between the proxy's real connects and the probe
@@ -241,6 +251,7 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     app.state.payments = payments_cfg
     app.state.stripe = stripe_cfg
     app.state.free_teleop = free_teleop_cfg
+    app.state.capture_flag = capture_flag_cfg
     app.state.reachability = reachability
 
     # Everything the gateway serves under a robot's own prefix: the realtime socket
@@ -252,7 +263,10 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
     from core.descriptor_route import CORS_HEADERS, register_descriptor_route
     from core.ws_proxy import register_ws_proxy
 
-    register_ws_proxy(app, plugins, registry, reachability, payments_cfg, free_teleop_cfg, stripe_cfg)
+    register_ws_proxy(
+        app, plugins, registry, reachability, payments_cfg, free_teleop_cfg, stripe_cfg,
+        capture_flag_cfg,
+    )
     register_console(app, plugins)
     register_descriptor_route(app, plugins)
 
@@ -275,7 +289,9 @@ def create_gateway(plugins: dict[str, RobotPlugin]) -> FastAPI:
                 "service": "Robot Fleet Gateway",
                 "payments": index_summary(payments_cfg),
                 "stripe": stripe_summary(stripe_cfg),
-                "teleop": teleop_summary(payments_cfg, free_teleop_cfg, stripe_cfg),
+                "teleop": teleop_summary(
+                    payments_cfg, free_teleop_cfg, stripe_cfg, capture_flag_cfg
+                ),
                 "robots": {
                     name: {
                         "mcp_endpoint": f"/{name}/mcp",

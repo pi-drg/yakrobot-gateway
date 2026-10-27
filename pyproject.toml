@@ -30,6 +30,9 @@ export = ["yakrobot-descriptor[model]"]
 # Recovers the signer of a paid-teleop capability against PAYMENTS_ISSUER — signature
 # verification only: no RPC, no provider, no private key. See AGENTS.md.
 payments = ["eth-keys>=0.7", "eth-hash[pycryptodome]>=0.7", "httpx>=0.28.1"]
+# Capture-flag mode: recovers the player from their EIP-712 Capture signature and reads
+# lastCapture with one eth_call (read-only: no private key, no signing). See AGENTS.md.
+capture-flag = ["eth-keys>=0.7", "eth-hash[pycryptodome]>=0.7", "httpx>=0.28.1"]
 # Per-operator Stripe fiat gate: raw httpx against the Stripe REST API (no SDK).
 stripe = ["httpx>=0.28.1"]
 all = [

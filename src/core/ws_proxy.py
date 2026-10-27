@@ -449,6 +449,7 @@ def register_ws_proxy(
     payments,
     free,
     stripe,
+    capture_flag=None,
 ) -> None:
     """Add ``/{robot}/ws/{path}`` to the gateway.
 

@@ -4,6 +4,8 @@ Every test sets and restores env via monkeypatch, per paid-teleop-execution.md Â
 """
 
 import sys
+
+import pytest
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -11,11 +13,13 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from core.payments_config import (  # noqa: E402
+    CaptureFlagConfig,
     FreeTeleopConfig,
     PaymentsConfig,
     PaymentsConfigError,
     StripeConfig,
     index_summary,
+    load_capture_flag_config,
     load_free_teleop_config,
     load_payments_config,
     load_stripe_config,
@@ -43,6 +47,9 @@ def _set(monkeypatch, **env):
         "STRIPE_GATE_ENABLED", "STRIPE_SECRET_KEY", "STRIPE_PRICE_CENTS",
         "STRIPE_CURRENCY", "STRIPE_API_BASE",
         "STRIPE_AUTOMATIC_TAX", "STRIPE_TAX_CODE",
+        "TELEOP_CAPTURE_FLAG_ENABLED", "TELEOP_CAPTURE_FLAG_CONTRACT",
+        "TELEOP_CAPTURE_FLAG_CHAIN_ID", "TELEOP_CAPTURE_FLAG_RPC_URL",
+        "TELEOP_CAPTURE_FLAG_VALID_MINUTES", "TELEOP_CAPTURE_FLAG_CLAIM_URL",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
@@ -405,4 +412,104 @@ def test_stripe_summary_shapes():
         "price_cents": 150,
         "currency": "usd",
         "lease_minutes": 5,
+    }
+
+
+# --- Capture-flag mode -----------------------------------------------------------
+
+VALID_FLAG = {
+    "TELEOP_CAPTURE_FLAG_ENABLED": "1",
+    "TELEOP_CAPTURE_FLAG_CONTRACT": "0xF3F2e69A1b00577d5d6ca1911a3a80132CD08737",
+    "TELEOP_CAPTURE_FLAG_CHAIN_ID": "84532",
+    "TELEOP_CAPTURE_FLAG_RPC_URL": "https://sepolia.base.org",
+    "TELEOP_CAPTURE_FLAG_CLAIM_URL": "https://capture-flag.yakrobot.com/r/india",
+}
+OFF = (PaymentsConfig(enabled=False), StripeConfig(enabled=False))
+
+
+def test_capture_flag_disabled_by_default(monkeypatch):
+    _set(monkeypatch, TELEOP_CAPTURE_FLAG_CONTRACT="junk")
+    assert load_capture_flag_config(*OFF) == CaptureFlagConfig(enabled=False)
+
+
+def test_capture_flag_valid(monkeypatch):
+    _set(monkeypatch, **VALID_FLAG)
+    cfg = load_capture_flag_config(*OFF)
+    assert cfg == CaptureFlagConfig(
+        enabled=True,
+        contract="0xf3f2e69a1b00577d5d6ca1911a3a80132cd08737",
+        chain_id=84532,
+        rpc_url="https://sepolia.base.org",
+        valid_minutes=30,
+        claim_url="https://capture-flag.yakrobot.com/r/india",
+        lease_minutes=5,
+    )
+    assert "sepolia.base.org" not in repr(cfg)
+
+
+@pytest.mark.parametrize(
+    "gates",
+    [
+        (PaymentsConfig(enabled=True), StripeConfig(enabled=False)),
+        (PaymentsConfig(enabled=False), StripeConfig(enabled=True)),
+    ],
+)
+def test_capture_flag_refuses_paid_gates(monkeypatch, gates):
+    _set(monkeypatch, **VALID_FLAG)
+    with pytest.raises(PaymentsConfigError, match="needs free mode"):
+        load_capture_flag_config(*gates)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "TELEOP_CAPTURE_FLAG_CONTRACT",
+        "TELEOP_CAPTURE_FLAG_CHAIN_ID",
+        "TELEOP_CAPTURE_FLAG_RPC_URL",
+        "TELEOP_CAPTURE_FLAG_CLAIM_URL",
+    ],
+)
+def test_capture_flag_requires(monkeypatch, name):
+    env = {k: v for k, v in VALID_FLAG.items() if k != name}
+    _set(monkeypatch, **env)
+    with pytest.raises(PaymentsConfigError, match=name):
+        load_capture_flag_config(*OFF)
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("TELEOP_CAPTURE_FLAG_CONTRACT", "0x1234"),
+        ("TELEOP_CAPTURE_FLAG_CHAIN_ID", "1"),
+        ("TELEOP_CAPTURE_FLAG_CHAIN_ID", "base"),
+        ("TELEOP_CAPTURE_FLAG_RPC_URL", "http://rpc.example"),
+        ("TELEOP_CAPTURE_FLAG_CLAIM_URL", "capture-flag.yakrobot.com"),
+        ("TELEOP_CAPTURE_FLAG_VALID_MINUTES", "0"),
+        ("TELEOP_CAPTURE_FLAG_VALID_MINUTES", "121"),
+        ("TELEOP_CAPTURE_FLAG_VALID_MINUTES", "ten"),
+    ],
+)
+def test_capture_flag_rejects(monkeypatch, name, value):
+    _set(monkeypatch, **{**VALID_FLAG, name: value})
+    with pytest.raises(PaymentsConfigError, match=name):
+        load_capture_flag_config(*OFF)
+
+
+def test_capture_flag_rpc_url_never_echoed(monkeypatch):
+    _set(monkeypatch, **{**VALID_FLAG, "TELEOP_CAPTURE_FLAG_RPC_URL": "http://secret-key.example"})
+    with pytest.raises(PaymentsConfigError) as err:
+        load_capture_flag_config(*OFF)
+    assert "secret-key" not in str(err.value)
+
+
+def test_teleop_summary_capture_flag(monkeypatch):
+    _set(monkeypatch, **VALID_FLAG)
+    flag = load_capture_flag_config(*OFF)
+    free = load_free_teleop_config(*OFF)
+    assert teleop_summary(*OFF[:1], free, OFF[1], flag) == {
+        "reservation": "capture_flag",
+        "lease_minutes": 5,
+        "contract": "0xf3f2e69a1b00577d5d6ca1911a3a80132cd08737",
+        "chain_id": 84532,
+        "claim_url": "https://capture-flag.yakrobot.com/r/india",
     }
