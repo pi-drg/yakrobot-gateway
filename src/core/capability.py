@@ -6,9 +6,9 @@ implements exactly those. It is a **verifier only**: the gateway never mints a
 capability (that is the payments service's job), so there is no signing function here —
 see ``tests/capability_helper.py`` for the test-only mint used to build fixtures.
 
-Importing ``eth_keys``/``eth_hash`` is lazy, inside :func:`verify`, matching AGENTS.md's
-no-chain-code exception: this is signature *verification* only — no RPC, no provider, no
-private key.
+Recovery is ``core.eth_sig.recover_personal``, which imports ``eth_keys``/``eth_hash``
+lazily, matching AGENTS.md's exception: this is signature *verification* only — no RPC,
+no provider, no private key.
 """
 
 import base64
@@ -70,9 +70,7 @@ def verify(token: str, issuer: str, *, lease_minutes: int, now: int) -> Claims:
     specifies, because each of those has its own distinct refusal reason. Every failure
     here is the single reason "invalid lease" — §0.5 does not distinguish among them.
     """
-    from eth_hash.auto import keccak
-    from eth_keys import keys
-    from eth_keys.exceptions import BadSignature, ValidationError
+    from core.eth_sig import SignatureError, recover_personal
 
     parts = token.split(".")
     if len(parts) != 2:
@@ -87,16 +85,12 @@ def verify(token: str, issuer: str, *, lease_minutes: int, now: int) -> Claims:
     if len(signature) != 65 or signature[64] not in (27, 28):
         raise CapabilityError("invalid lease")
 
-    prefixed = b"\x19Ethereum Signed Message:\n" + str(len(payload)).encode() + payload
-    digest = keccak(prefixed)
-
     try:
-        sig = keys.Signature(signature_bytes=signature[:64] + bytes([signature[64] - 27]))
-        recovered = sig.recover_public_key_from_msg_hash(digest)
-    except (BadSignature, ValidationError, ValueError):
+        recovered = recover_personal(payload, signature)
+    except SignatureError:
         raise CapabilityError("invalid lease") from None
 
-    if recovered.to_checksum_address().lower() != issuer.lower():
+    if recovered != issuer.lower():
         raise CapabilityError("invalid lease")
 
     try:
