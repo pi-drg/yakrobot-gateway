@@ -216,8 +216,8 @@ Serving:
 - Task auctions live in `yakrobot-marketplace`. Card-paid teleop is gated here, against
   the operator's own Stripe account (below).
 - **Teleop admission is always gated one of two ways — paid or free — never neither.**
-  The gate modes are `paid` (x402), `card` (Stripe), `free`, and `flag` (capture-flag,
-  a variant of free).
+  `GET /` reports which as `teleop.reservation`: `paid` (x402, Stripe or both), `free`,
+  or `capture_flag` (free with a capture required).
   Paid means an x402 capability, a card-paid (Stripe) lease, or both; free is on only
   when neither paid gate is enabled. `PAYMENTS_ENABLED` and `STRIPE_GATE_ENABLED` (both
   `0`/`1`, default `0`) pick which. There is no separate free-mode toggle and no
