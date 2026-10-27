@@ -1,9 +1,13 @@
-"""The one chain read capture-flag mode makes: ``CaptureFlag.lastCapture(robotId, player)``.
+"""Ask the CaptureFlag contract when a player last captured this robot.
 
-Read-only: a single ``eth_call`` to ``TELEOP_CAPTURE_FLAG_RPC_URL``, hand-encoded. No
-private key, no signing, no transactions (AGENTS.md). It runs only when someone reserves
-the robot (capture-flag design G3), never on socket admit, so an RPC outage stops new
-rides and leaves rides in progress alone.
+This is a public read, like looking the contract up on a block explorer: one
+``eth_call`` of ``lastCapture(robotId, player)`` to ``TELEOP_CAPTURE_FLAG_RPC_URL``. The
+gateway holds no private key and never signs or sends a transaction (AGENTS.md); the
+capture-flag relayer does that, elsewhere. The request bytes are built here by hand, so
+no Ethereum client library is needed.
+
+It runs only when someone reserves the robot (capture-flag design G3), never when a
+socket connects, so if the RPC is down new rides are refused and rides in progress go on.
 """
 
 import re
