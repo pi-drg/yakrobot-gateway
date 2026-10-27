@@ -1712,9 +1712,13 @@ class _Player:
         return robot_id_for(host, robot)
 
     def capture(self, *, robot_id=None, chain_id=84532, contract=CF_CONTRACT, signer=None) -> dict:
-        """The ``{c, s}`` body the console posts, ``c`` as ``eth_signTypedData_v4`` got it."""
+        """The ``{c, s, k}`` body the console posts, ``c`` as ``eth_signTypedData_v4`` got
+        it, signed over ``nonce = sha256(k)`` as the capture-flag page does."""
+        import hashlib
+
         from core.eth_sig import CAPTURE_TYPES, capture_digest
 
+        k = os.urandom(32)
         typed = {
             "types": CAPTURE_TYPES,
             "primaryType": "Capture",
@@ -1727,12 +1731,16 @@ class _Player:
             "message": {
                 "robotId": robot_id or self.robot_id(),
                 "player": self.address,
-                "nonce": str(int.from_bytes(os.urandom(8), "big")),
+                "nonce": str(int.from_bytes(hashlib.sha256(k).digest(), "big")),
                 "deadline": str(int(time.time()) + 300),
             },
         }
         signed = (signer or self.key).sign_msg_hash(capture_digest(typed)).to_bytes()
-        return {"c": typed, "s": "0x" + (signed[:64] + bytes([signed[64] + 27])).hex()}
+        return {
+            "c": typed,
+            "s": "0x" + (signed[:64] + bytes([signed[64] + 27])).hex(),
+            "k": "0x" + k.hex(),
+        }
 
     def captured(self, rpc: _FakeRpcNode, ago_s: int = 60) -> None:
         """Record this player's capture of the robot on the fake chain, ``ago_s`` ago."""
@@ -1808,8 +1816,13 @@ def test_capture_flag_bad_captures_are_400_and_change_nothing():
                 "another chain": player.capture(chain_id=8453),
                 "another contract": player.capture(contract="0x" + "33" * 20),
                 "someone else's signature": player.capture(signer=keys.PrivateKey(os.urandom(32))),
-                "not typed data": {"c": "hello", "s": "0x00"},
+                "not typed data": {"c": "hello", "s": "0x00", "k": "0x" + "00" * 32},
             }
+            # What anyone can read from the relayer's transaction: c and s, but not k.
+            seen_on_chain = player.capture()
+            del seen_on_chain["k"]
+            bad["no ride secret"] = seen_on_chain
+            bad["a guessed ride secret"] = {**seen_on_chain, "k": "0x" + "11" * 32}
             async with httpx.AsyncClient() as client:
                 for name, body in bad.items():
                     r = await client.post(RESERVE_URL, json=body)

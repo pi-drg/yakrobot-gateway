@@ -53,6 +53,7 @@ safety model that lives on the robot:
 
 import asyncio
 import base64
+import hashlib
 import html
 import json
 import logging
@@ -536,9 +537,9 @@ def register_ws_proxy(
         try:
             body = json.loads(raw)
         except ValueError:
-            return refuse(400, "body must be JSON {c, s}")
+            return refuse(400, "body must be JSON {c, s, k}")
         if not isinstance(body, dict):
-            return refuse(400, "body must be JSON {c, s}")
+            return refuse(400, "body must be JSON {c, s, k}")
 
         # 1. Signature, domain and robot. `deadline` only bounds when the relayer could
         # submit; it isn't checked here (design G3a).
@@ -553,6 +554,14 @@ def register_ws_proxy(
         # From configuration only: the Host header is the caller's to choose.
         if capture.robot_id != robot_id_for(capture_flag.public_host, robot):
             return refuse(400, "bad capture: it is for another robot")
+        # The signature is public once the relayer submits it, so it alone proves
+        # nothing. The page signs nonce = sha256(k) and hands k only to its player,
+        # through the URL fragment; whoever holds k is the one who captured.
+        k = body.get("k")
+        if not isinstance(k, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", k):
+            return refuse(400, "bad capture: missing its ride secret")
+        if int.from_bytes(hashlib.sha256(bytes.fromhex(k[2:])).digest(), "big") != capture.nonce:
+            return refuse(400, "bad capture: the ride secret doesn't match")
 
         # 2. The capture's time, on-chain.
         try:
@@ -906,7 +915,7 @@ def register_ws_proxy(
         point, so a re-click after expiry always mints a fresh lease, never stretches
         the old one.
 
-        In capture-flag mode the body must carry a recent capture ``{c, s}``, checked by
+        In capture-flag mode the body must carry a recent capture ``{c, s, k}``, checked by
         ``_check_capture`` before anything below runs; the lease itself is unchanged.
         """
         if robot not in proxied:
