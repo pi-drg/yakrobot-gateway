@@ -508,7 +508,7 @@
       <span class="val num"><b id="speedVal">80</b><i>%</i></span>
       <input id="speed" type="range" min="10" max="100" step="5" value="80" />
       <p class="hint">Server clamps every duty to <b class="num" id="maxDuty">—</b>.
-        Sets driving speed; turns reach that cap at 80% and above.</p>
+        Sets driving speed. Freenove pivots reach their cap at 80% and above.</p>
     </div>
 
     <button class="ghost" id="padBtn" type="button">Touch controls</button>
@@ -592,10 +592,9 @@
         Chromium is the safer browser for driving.</li>
       <li><b>Switching tabs stops the car.</b> Losing focus clears every held key
         and sends a stop.</li>
-      <li><b>Turns ask for full power.</b> Pivoting has to break four tyres
-        loose at once, so <kbd>A</kbd>/<kbd>D</kbd> take the robot's whole duty
-        allowance whenever the speed slider is at 80% or above — a scaled-down
-        pivot stalls on carpet instead of turning gently.</li>
+      <li><b>Freenove turns ask for full power.</b> Pivoting has to break four
+        tyres loose at once, so <kbd>A</kbd>/<kbd>D</kbd> reach the car's duty
+        allowance at 80% speed and above. Lower settings may stall on carpet.</li>
       <li><b>One driver at a time.</b> A second browser sees the video but cannot
         steer.</li>
     </ul>
@@ -714,10 +713,8 @@
   function derive() {
     const on = intents();
     let vx = 0, vy = 0, om = 0;
-    // Full-slider duties. Sized for the Adeept AWR (2026-10-25): it struggled on
-    // carpet, so straight runs use the motor maximum (that car's unit.json raises
-    // its max_duty to 4095) and spins 3000 — twitchy on a hard floor, where the
-    // speed slider takes them down. A robot's max_duty still caps them.
+    // Keep the Freenove's measured 1200 straight duty. The Adeept AWR uses
+    // 4095 at full slider on carpet; each robot's max_duty still caps it.
     const forwardDuty = robotName === "picar_freenove" ? 1200 : 4095;
     if (on.has("fwd")) vx += forwardDuty;
     if (on.has("back")) vx -= forwardDuty;
