@@ -510,17 +510,28 @@ def register_ws_proxy(
     # a reconnect, not a replay. Pruned of expired entries on each confirm.
     confirmed_sessions: dict[str, tuple[str, int]] = {}
 
-    # Capture-flag mode (capture-flag design G3/G4): each capture starts one ride. Keyed
-    # (robot, player, t), where t is the capture's on-chain time; kept while the capture
-    # is still inside VALID_MINUTES, so a capture can't ride again once its ride ends. In
-    # memory: a restart forgets it, so a capture younger than VALID_MINUTES may ride once
-    # more (design G4 accepts that). Empty and unused unless capture-flag mode is on.
-    started: dict[tuple[str, str, int], int] = {}
+    # Capture-flag mode (capture-flag design G3/G4): each capture starts one ride, recorded
+    # in a SQLite file (core.capture_rides) so a restart remembers it. Opened here, at
+    # startup: a state file that can't be opened stops the gateway, never a silent
+    # in-memory fallback that would forget rides on the next reboot.
     capture_flag_on = capture_flag is not None and capture_flag.enabled
+    rides = None
+    if capture_flag_on:
+        import sqlite3
+
+        from core.capture_rides import RideLedger
+        from core.payments_config import PaymentsConfigError
+
+        try:
+            rides = RideLedger(capture_flag.state_file)
+        except (OSError, sqlite3.Error) as exc:
+            raise PaymentsConfigError(
+                f"TELEOP_CAPTURE_FLAG_STATE_FILE: can't open {capture_flag.state_file} ({exc})"
+            ) from exc
 
     async def _check_capture(request: Request, robot: str, now: int):
         """Design G3 steps 1–5, before the free mint. Returns ``(refusal, key)``: a
-        response to send, or the ``started`` key to record once the reserve succeeds."""
+        response to send, or the ride key to record once the reserve succeeds."""
         from core.capture_flag_chain import ChainUnavailable, last_capture
         from core.eth_sig import SignatureError, recover_typed_capture, robot_id_for
 
@@ -579,11 +590,10 @@ def register_ws_proxy(
         if t == 0 or now - t > window:
             return refuse(403, "no recent capture — capture this robot again")
 
-        # 4. One ride per capture.
-        for old in [k for k in started if now - k[2] > window]:
-            del started[old]
+        # 4. One ride per capture, across restarts.
+        rides.prune(now - window)
         key = (robot, capture.player, t)
-        if key in started:
+        if rides.used(*key):
             return refuse(403, "this capture was already used")
 
         # 5. Reachable, so a ride isn't spent on a robot that's off.
@@ -950,9 +960,21 @@ def register_ws_proxy(
                 },
             )
 
-        free_leases[token] = FreeLease(lease_id=lease_id, robot=robot, exp=exp)
         if capture_key is not None:
-            started[capture_key] = exp
+            # Recorded before the token is handed out: if the write fails, the hold is
+            # given back and the capture stays unused, rather than a ride nobody logged.
+            try:
+                rides.record(*capture_key, exp)
+            except Exception:
+                logger.exception("capture flag: could not record the ride")
+                registry.release(robot, holder)
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "couldn't record your ride, try again — your capture was not used"
+                    },
+                )
+        free_leases[token] = FreeLease(lease_id=lease_id, robot=robot, exp=exp)
         return {"token": token, "lease": lease_id, "robot": robot, "exp": exp}
 
     @app.get("/{robot}/stripe/start")

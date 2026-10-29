@@ -106,6 +106,7 @@ _CLEARED_ENV_VARS = (
     "TELEOP_CAPTURE_FLAG_ENABLED", "TELEOP_CAPTURE_FLAG_CONTRACT",
     "TELEOP_CAPTURE_FLAG_CHAIN_ID", "TELEOP_CAPTURE_FLAG_RPC_URL",
     "TELEOP_CAPTURE_FLAG_VALID_MINUTES", "TELEOP_CAPTURE_FLAG_CLAIM_URL",
+    "TELEOP_CAPTURE_FLAG_STATE_FILE",
 )
 
 
@@ -1673,8 +1674,13 @@ class _FakeRpcNode:
     """Serve the fake JSON-RPC node on GW_PORT + 30 and expose its state."""
 
     def __init__(self):
+        import tempfile
+
         self.port = GW_PORT + 30
         self.state = RpcState(contract=CF_CONTRACT)
+        # One ride ledger per node, so every test starts with no captures used, and a
+        # test that restarts the gateway with the same env keeps them.
+        self.rides = os.path.join(tempfile.mkdtemp(prefix="capture-rides-"), "rides.sqlite3")
 
     async def __aenter__(self):
         self._server, self._task = await _serve(create_fake_rpc(self.state), self.port)
@@ -1691,6 +1697,7 @@ class _FakeRpcNode:
             TELEOP_CAPTURE_FLAG_CHAIN_ID="84532",
             TELEOP_CAPTURE_FLAG_RPC_URL=f"http://127.0.0.1:{self.port}/",
             TELEOP_CAPTURE_FLAG_CLAIM_URL=CF_CLAIM_URL,
+            TELEOP_CAPTURE_FLAG_STATE_FILE=self.rides,
             NGROK_DOMAIN=CF_PUBLIC_HOST,
         )
         env.update(overrides)
@@ -1881,6 +1888,62 @@ def test_capture_flag_one_ride_per_capture():
                 assert (await client.post(RESERVE_URL, json=player.capture())).status_code == 200
 
     asyncio.run(run())
+
+
+def test_capture_flag_one_ride_per_capture_survives_a_restart():
+    async def run():
+        import httpx
+
+        async with _FakeRpcNode() as rpc:
+            player, other = _Player(), _Player()
+            player.captured(rpc)
+            other.captured(rpc)
+            async with _Stack(env=rpc.env()):
+                async with httpx.AsyncClient() as client:
+                    first = await client.post(RESERVE_URL, json=player.capture())
+                    assert first.status_code == 200
+                    await client.post(RELEASE_URL, json={"token": first.json()["token"]})
+
+            # A friend reboots the Pi: same state file, fresh process memory.
+            async with _Stack(env=rpc.env()):
+                async with httpx.AsyncClient() as client:
+                    again = await client.post(RESERVE_URL, json=player.capture())
+                    assert again.status_code == 403
+                    assert again.json()["detail"] == "this capture was already used"
+                    # A capture that hadn't ridden still can.
+                    assert (await client.post(RESERVE_URL, json=other.capture())).status_code == 200
+
+    asyncio.run(run())
+
+
+def test_capture_flag_unopenable_state_file_stops_startup(tmp_path):
+    import core.server  # noqa: F401  (load .env before clearing, as _Stack does)
+    from core.payments_config import PaymentsConfigError
+    from core.server import create_gateway
+    from yakrobot_cli.commands import _load_plugins
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    env = _FakeRpcNode().env(TELEOP_CAPTURE_FLAG_STATE_FILE=str(blocker / "rides.sqlite3"))
+    _clear_auth_env()
+    os.environ.update(env)
+    try:
+        with pytest.raises(PaymentsConfigError, match="TELEOP_CAPTURE_FLAG_STATE_FILE"):
+            create_gateway(_load_plugins(["fakerobot_picar"]))
+    finally:
+        _clear_auth_env()
+
+
+def test_ride_ledger_prunes_captures_older_than_the_window(tmp_path):
+    from core.capture_rides import RideLedger
+
+    path = str(tmp_path / "rides.sqlite3")
+    ledger = RideLedger(path)
+    ledger.record("r", "0xold", 100, 400)
+    ledger.record("r", "0xnew", 900, 1200)
+    ledger.prune(500)
+    assert not ledger.used("r", "0xold", 100)
+    assert RideLedger(path).used("r", "0xnew", 900)
 
 
 def test_capture_flag_busy_robot_does_not_use_the_capture():

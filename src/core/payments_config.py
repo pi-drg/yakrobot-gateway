@@ -43,6 +43,14 @@ _DEFAULT_PRICE_USDC = "1.00"
 _DEFAULT_LEASE_MINUTES = "5"
 _DEFAULT_STRIPE_API_BASE = "https://api.stripe.com"
 _DEFAULT_VALID_MINUTES = "30"
+
+
+def _default_state_file() -> str:
+    """``$XDG_STATE_HOME/yakrobot-gateway/capture-flag-rides.sqlite3``, the XDG default
+    being ``~/.local/state``: per user, outside the repo, kept across reboots."""
+    base = os.getenv("XDG_STATE_HOME", "").strip()
+    base = base or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "yakrobot-gateway", "capture-flag-rides.sqlite3")
 _CAPTURE_FLAG_CHAINS = {84532, 8453}  # Base Sepolia, Base
 
 
@@ -89,6 +97,8 @@ class CaptureFlagConfig:
     lease_minutes: int | None = None
     # This gateway's public host, normalized: the robot id is keccak(public_host/robot).
     public_host: str | None = None
+    # The SQLite file of captures that have ridden (core.capture_rides).
+    state_file: str | None = None
 
 
 def _enabled() -> bool:
@@ -317,6 +327,9 @@ def load_capture_flag_config(
         valid_minutes=int(valid_raw),
         claim_url=claim_url,
         lease_minutes=load_lease_minutes(),
+        state_file=(
+            os.getenv("TELEOP_CAPTURE_FLAG_STATE_FILE", "").strip() or _default_state_file()
+        ),
     )
 
 

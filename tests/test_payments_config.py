@@ -50,6 +50,7 @@ def _set(monkeypatch, **env):
         "TELEOP_CAPTURE_FLAG_ENABLED", "TELEOP_CAPTURE_FLAG_CONTRACT",
         "TELEOP_CAPTURE_FLAG_CHAIN_ID", "TELEOP_CAPTURE_FLAG_RPC_URL",
         "TELEOP_CAPTURE_FLAG_VALID_MINUTES", "TELEOP_CAPTURE_FLAG_CLAIM_URL",
+        "TELEOP_CAPTURE_FLAG_STATE_FILE", "XDG_STATE_HOME",
         "NGROK_DOMAIN", "CLOUDFLARE_DOMAIN",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -435,7 +436,7 @@ def test_capture_flag_disabled_by_default(monkeypatch):
 
 
 def test_capture_flag_valid(monkeypatch):
-    _set(monkeypatch, **VALID_FLAG)
+    _set(monkeypatch, **VALID_FLAG, XDG_STATE_HOME="/var/lib/robot")
     cfg = load_capture_flag_config(*OFF)
     assert cfg == CaptureFlagConfig(
         enabled=True,
@@ -446,8 +447,20 @@ def test_capture_flag_valid(monkeypatch):
         claim_url="https://capture-flag.yakrobot.com/r/india",
         lease_minutes=5,
         public_host="robot.example.ngrok.app",
+        state_file="/var/lib/robot/yakrobot-gateway/capture-flag-rides.sqlite3",
     )
     assert "sepolia.base.org" not in repr(cfg)
+
+
+def test_capture_flag_state_file(monkeypatch):
+    _set(monkeypatch, **VALID_FLAG, TELEOP_CAPTURE_FLAG_STATE_FILE="/srv/rides.sqlite3")
+    assert load_capture_flag_config(*OFF).state_file == "/srv/rides.sqlite3"
+
+    _set(monkeypatch, **VALID_FLAG)
+    monkeypatch.setenv("HOME", "/home/drg")
+    assert load_capture_flag_config(*OFF).state_file == (
+        "/home/drg/.local/state/yakrobot-gateway/capture-flag-rides.sqlite3"
+    )
 
 
 @pytest.mark.parametrize(

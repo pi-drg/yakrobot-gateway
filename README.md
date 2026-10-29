@@ -166,8 +166,10 @@ pays the gas). To add your robot:
    and `uv sync --extra capture-flag` plus your robot's extra.
 4. **Start the gateway whenever you like.** While it's up, the robot shows as free on the
    index page; while it's down, it shows offline. Nothing else to do.
-5. **Restart caveat:** the gateway remembers which captures have already ridden in
-   memory, so a restart lets a capture less than 30 minutes old ride once more.
+5. **Restarts are fine:** the gateway remembers which captures have already ridden in
+   `~/.local/state/yakrobot-gateway/capture-flag-rides.sqlite3` (or
+   `TELEOP_CAPTURE_FLAG_STATE_FILE`), so rebooting the Pi doesn't give anyone a second
+   ride.
 
 The gateway holds no key and never sends a transaction. It checks the player's signature
 locally and reads the contract once per ride; if the RPC is down, no new rides start.

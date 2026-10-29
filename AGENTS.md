@@ -268,9 +268,11 @@ Serving:
     rides in progress go on. `robotId = keccak256(host + "/" + robot)`, where the host
     comes only from `NGROK_DOMAIN`/`CLOUDFLARE_DOMAIN` (required here), never from the
     `Host` header. Vars: `TELEOP_CAPTURE_FLAG_CONTRACT`, `_CHAIN_ID` (84532 or 8453),
-    `_RPC_URL` (never logged), `_VALID_MINUTES` (default 30), `_CLAIM_URL`. A capture
-    rides once: the `started` set is in memory, so a restart lets a capture under
-    `_VALID_MINUTES` old ride again.
+    `_RPC_URL` (never logged), `_VALID_MINUTES` (default 30), `_CLAIM_URL`,
+    `_STATE_FILE`. A capture rides once, across restarts: used captures are kept in a
+    SQLite file (`core/capture_rides.py`), by default
+    `~/.local/state/yakrobot-gateway/capture-flag-rides.sqlite3`; the gateway won't start
+    if it can't open it.
 
   All validated at startup and reported on the `/` index (`core.payments_config`).
   Full rules: `plans/paid-teleop-execution.md` §0.1 in the `pi-drg` planning repo.
