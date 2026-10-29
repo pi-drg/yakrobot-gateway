@@ -18,6 +18,11 @@ payment, same ``TELEOP_LEASE_MINUTES`` cap, no money or signature involved — a
 are simply *whatever neither paid gate is*. There is no separate toggle and no
 "neither" state: every gateway runs one of the three. See ``load_free_teleop_config``.
 
+Capture-flag mode (``TELEOP_CAPTURE_FLAG_ENABLED``) is free mode with one check added:
+a reservation needs a recent on-chain capture of this robot (the capture-flag game).
+It requires free mode, so it refuses to start beside either paid gate. See
+``load_capture_flag_config``.
+
 Read at call time (the ``video_enabled()`` pattern in ``core.ws_proxy``), never cached at
 import, so tests and a running gateway both see live env changes.
 """
@@ -37,6 +42,16 @@ _TAX_CODE_RE = re.compile(r"^txcd_[0-9]{8}$")
 _DEFAULT_PRICE_USDC = "1.00"
 _DEFAULT_LEASE_MINUTES = "5"
 _DEFAULT_STRIPE_API_BASE = "https://api.stripe.com"
+_DEFAULT_VALID_MINUTES = "30"
+
+
+def _default_state_file() -> str:
+    """``$XDG_STATE_HOME/yakrobot-gateway/capture-flag-rides.sqlite3``, the XDG default
+    being ``~/.local/state``: per user, outside the repo, kept across reboots."""
+    base = os.getenv("XDG_STATE_HOME", "").strip()
+    base = base or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "yakrobot-gateway", "capture-flag-rides.sqlite3")
+_CAPTURE_FLAG_CHAINS = {84532, 8453}  # Base Sepolia, Base
 
 
 class PaymentsConfigError(ValueError):
@@ -69,6 +84,21 @@ class StripeConfig:
 class FreeTeleopConfig:
     enabled: bool
     lease_minutes: int | None = None
+
+
+@dataclass(frozen=True)
+class CaptureFlagConfig:
+    enabled: bool
+    contract: str | None = None
+    chain_id: int | None = None
+    rpc_url: str | None = field(default=None, repr=False)  # may embed a provider key
+    valid_minutes: int | None = None
+    claim_url: str | None = None
+    lease_minutes: int | None = None
+    # This gateway's public host, normalized: the robot id is keccak(public_host/robot).
+    public_host: str | None = None
+    # The SQLite file of captures that have ridden (core.capture_rides).
+    state_file: str | None = None
 
 
 def _enabled() -> bool:
@@ -236,6 +266,73 @@ def load_free_teleop_config(
     return FreeTeleopConfig(enabled=True, lease_minutes=load_lease_minutes())
 
 
+def load_capture_flag_config(
+    payments: PaymentsConfig, stripe: StripeConfig
+) -> CaptureFlagConfig:
+    """Read and validate the TELEOP_CAPTURE_FLAG_* variables (capture-flag design G1).
+
+    When ``TELEOP_CAPTURE_FLAG_ENABLED`` is off, returns ``CaptureFlagConfig(enabled=False)``
+    without reading anything else. When on, it needs free mode: either paid gate being on
+    too is an error, not a silent precedence. The ride length is the shared
+    ``TELEOP_LEASE_MINUTES``.
+
+    It also needs the public domain (``NGROK_DOMAIN`` or ``CLOUDFLARE_DOMAIN``): the robot
+    id a capture names is derived from it, and never from a request's ``Host`` header,
+    which the caller controls.
+    """
+    from core.capability import normalize_host
+
+    flag = "TELEOP_CAPTURE_FLAG_ENABLED"
+    if os.getenv(flag, "").strip().lower() not in _TRUTHY:
+        return CaptureFlagConfig(enabled=False)
+    if payments.enabled or stripe.enabled:
+        raise PaymentsConfigError(
+            f"{flag} needs free mode: turn off PAYMENTS_ENABLED and STRIPE_GATE_ENABLED"
+        )
+
+    contract = _validate_issuer(
+        "TELEOP_CAPTURE_FLAG_CONTRACT", _require("TELEOP_CAPTURE_FLAG_CONTRACT", flag=flag)
+    )
+    chain_raw = _require("TELEOP_CAPTURE_FLAG_CHAIN_ID", flag=flag)
+    if not chain_raw.isdigit() or int(chain_raw) not in _CAPTURE_FLAG_CHAINS:
+        raise PaymentsConfigError(
+            "TELEOP_CAPTURE_FLAG_CHAIN_ID must be 84532 (Base Sepolia) or 8453 (Base)"
+        )
+    # Never echoed: a provider URL can carry an API key.
+    rpc_url = _validate_url(
+        "TELEOP_CAPTURE_FLAG_RPC_URL", _require("TELEOP_CAPTURE_FLAG_RPC_URL", flag=flag)
+    )
+    valid_raw = os.getenv("TELEOP_CAPTURE_FLAG_VALID_MINUTES", _DEFAULT_VALID_MINUTES).strip()
+    if not valid_raw.isdigit() or not (1 <= int(valid_raw) <= 120):
+        raise PaymentsConfigError(
+            "TELEOP_CAPTURE_FLAG_VALID_MINUTES must be an integer between 1 and 120"
+        )
+    claim_url = _validate_url(
+        "TELEOP_CAPTURE_FLAG_CLAIM_URL", _require("TELEOP_CAPTURE_FLAG_CLAIM_URL", flag=flag)
+    )
+
+    domain = os.getenv("NGROK_DOMAIN", "").strip() or os.getenv("CLOUDFLARE_DOMAIN", "").strip()
+    if not domain:
+        raise PaymentsConfigError(
+            f"{flag} needs the gateway's fixed public domain: set NGROK_DOMAIN or "
+            "CLOUDFLARE_DOMAIN"
+        )
+
+    return CaptureFlagConfig(
+        enabled=True,
+        public_host=normalize_host(domain),
+        contract=contract,
+        chain_id=int(chain_raw),
+        rpc_url=rpc_url,
+        valid_minutes=int(valid_raw),
+        claim_url=claim_url,
+        lease_minutes=load_lease_minutes(),
+        state_file=(
+            os.getenv("TELEOP_CAPTURE_FLAG_STATE_FILE", "").strip() or _default_state_file()
+        ),
+    )
+
+
 def index_summary(cfg: PaymentsConfig) -> dict:
     """The ``payments`` object reported on ``GET /`` (paid-teleop-execution.md §0.4)."""
     if not cfg.enabled:
@@ -261,18 +358,31 @@ def stripe_summary(cfg: StripeConfig) -> dict:
 
 
 def teleop_summary(
-    payments: PaymentsConfig, free: FreeTeleopConfig, stripe: StripeConfig
+    payments: PaymentsConfig,
+    free: FreeTeleopConfig,
+    stripe: StripeConfig,
+    capture_flag: CaptureFlagConfig = CaptureFlagConfig(enabled=False),
 ) -> dict:
     """The top-level ``teleop`` object reported on ``GET /`` — a sibling of ``payments``
-    and ``stripe`` so the console can tell "none," "free," and "paid" apart with one
-    read. "paid" is reported when either paid gate is on, with ``lease_minutes`` taken
-    from whichever gate is enabled (both read the same env var).
+    and ``stripe`` so the console can tell "none," "free," "capture_flag" and "paid"
+    apart with one read. "paid" is reported when either paid gate is on, with
+    ``lease_minutes`` taken from whichever gate is enabled (both read the same env var).
+    "capture_flag" is free mode with a capture required; the capture-flag Worker keys on
+    that exact string to list the robot as playable.
     """
     if payments.enabled or stripe.enabled:
         lease_minutes = (
             payments.lease_minutes if payments.enabled else stripe.lease_minutes
         )
         return {"reservation": "paid", "lease_minutes": lease_minutes}
+    if capture_flag.enabled:
+        return {
+            "reservation": "capture_flag",
+            "lease_minutes": capture_flag.lease_minutes,
+            "contract": capture_flag.contract,
+            "chain_id": capture_flag.chain_id,
+            "claim_url": capture_flag.claim_url,
+        }
     if free.enabled:
         return {"reservation": "free", "lease_minutes": free.lease_minutes}
     return {"reservation": "none", "lease_minutes": None}

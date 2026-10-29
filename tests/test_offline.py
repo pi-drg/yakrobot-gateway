@@ -137,6 +137,7 @@ def _gateway_client(monkeypatch):
     # A developer's real tunnel domain must not decide what these assert on.
     monkeypatch.delenv("NGROK_DOMAIN", raising=False)
     monkeypatch.delenv("CLOUDFLARE_DOMAIN", raising=False)
+    monkeypatch.delenv("TELEOP_CAPTURE_FLAG_ENABLED", raising=False)
     return TestClient(create_gateway(_fakerobot_plugins()))
 
 

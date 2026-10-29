@@ -53,6 +53,7 @@ safety model that lives on the robot:
 
 import asyncio
 import base64
+import hashlib
 import html
 import json
 import logging
@@ -449,6 +450,7 @@ def register_ws_proxy(
     payments,
     free,
     stripe,
+    capture_flag=None,
 ) -> None:
     """Add ``/{robot}/ws/{path}`` to the gateway.
 
@@ -507,6 +509,97 @@ def register_ws_proxy(
     # doesn't call Stripe again. NOT a blocklist — re-presenting the same session id is
     # a reconnect, not a replay. Pruned of expired entries on each confirm.
     confirmed_sessions: dict[str, tuple[str, int]] = {}
+
+    # Capture-flag mode (capture-flag design G3/G4): each capture starts one ride, recorded
+    # in a SQLite file (core.capture_rides) so a restart remembers it. Opened here, at
+    # startup: a state file that can't be opened stops the gateway, never a silent
+    # in-memory fallback that would forget rides on the next reboot.
+    capture_flag_on = capture_flag is not None and capture_flag.enabled
+    rides = None
+    if capture_flag_on:
+        import sqlite3
+
+        from core.capture_rides import RideLedger
+        from core.payments_config import PaymentsConfigError
+
+        try:
+            rides = RideLedger(capture_flag.state_file)
+        except (OSError, sqlite3.Error) as exc:
+            raise PaymentsConfigError(
+                f"TELEOP_CAPTURE_FLAG_STATE_FILE: can't open {capture_flag.state_file} ({exc})"
+            ) from exc
+
+    async def _check_capture(request: Request, robot: str, now: int):
+        """Design G3 steps 1–5, before the free mint. Returns ``(refusal, key)``: a
+        response to send, or the ride key to record once the reserve succeeds."""
+        from core.capture_flag_chain import ChainUnavailable, last_capture
+        from core.eth_sig import SignatureError, recover_typed_capture, robot_id_for
+
+        import httpx
+
+        def refuse(status: int, detail: str):
+            return JSONResponse(status_code=status, content={"detail": detail}), None
+
+        raw = await request.body()
+        if not raw.strip():
+            return refuse(
+                403, f"capture required — capture this robot at {capture_flag.claim_url}"
+            )
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return refuse(400, "body must be JSON {c, s, k}")
+        if not isinstance(body, dict):
+            return refuse(400, "body must be JSON {c, s, k}")
+
+        # 1. Signature, domain and robot. `deadline` only bounds when the relayer could
+        # submit; it isn't checked here (design G3a).
+        try:
+            signer, capture = recover_typed_capture(body.get("c"), body.get("s"))
+        except SignatureError as exc:
+            return refuse(400, f"bad capture: {exc}")
+        if signer != capture.player:
+            return refuse(400, "bad capture: the signature is not the player's")
+        if capture.chain_id != capture_flag.chain_id or capture.contract != capture_flag.contract:
+            return refuse(400, "bad capture: wrong chain or contract for this gateway")
+        # From configuration only: the Host header is the caller's to choose.
+        if capture.robot_id != robot_id_for(capture_flag.public_host, robot):
+            return refuse(400, "bad capture: it is for another robot")
+        # The signature is public once the relayer submits it, so it alone proves
+        # nothing. The page signs nonce = sha256(k) and hands k only to its player,
+        # through the URL fragment; whoever holds k is the one who captured.
+        k = body.get("k")
+        if not isinstance(k, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", k):
+            return refuse(400, "bad capture: missing its ride secret")
+        if int.from_bytes(hashlib.sha256(bytes.fromhex(k[2:])).digest(), "big") != capture.nonce:
+            return refuse(400, "bad capture: the ride secret doesn't match")
+
+        # 2. The capture's time, on-chain.
+        try:
+            async with httpx.AsyncClient() as client:
+                t = await last_capture(
+                    client, capture_flag.rpc_url, capture_flag.contract,
+                    capture.robot_id, capture.player,
+                )
+        except ChainUnavailable as exc:
+            logger.warning("capture flag: lastCapture lookup failed (%s)", exc)
+            return refuse(503, "capture lookup unavailable, try again shortly")
+
+        # 3. Recent enough.
+        window = capture_flag.valid_minutes * 60
+        if t == 0 or now - t > window:
+            return refuse(403, "no recent capture — capture this robot again")
+
+        # 4. One ride per capture, across restarts.
+        rides.prune(now - window)
+        key = (robot, capture.player, t)
+        if rides.used(*key):
+            return refuse(403, "this capture was already used")
+
+        # 5. Reachable, so a ride isn't spent on a robot that's off.
+        if reachability.get(robot) is False:
+            return refuse(503, "robot offline — your capture was not used")
+        return None, key
 
     @app.websocket("/{robot}/ws/{path:path}")
     async def robot_ws_proxy(ws: WebSocket, robot: str, path: str):
@@ -825,12 +918,15 @@ def register_ws_proxy(
         return {"released": True}
 
     @app.post("/{robot}/lease/reserve")
-    async def reserve_lease(robot: str) -> dict:
+    async def reserve_lease(robot: str, request: Request) -> dict:
         """Grant a free, timed, exclusive turn — no payment, no signature.
 
         Never renews an existing token: the hard cap at ``TELEOP_LEASE_MINUTES`` is the
         point, so a re-click after expiry always mints a fresh lease, never stretches
         the old one.
+
+        In capture-flag mode the body must carry a recent capture ``{c, s, k}``, checked by
+        ``_check_capture`` before anything below runs; the lease itself is unchanged.
         """
         if robot not in proxied:
             raise HTTPException(status_code=404, detail=f"no realtime socket for {robot!r}")
@@ -840,6 +936,12 @@ def register_ws_proxy(
             )
 
         now = int(time.time())
+        capture_key = None
+        if capture_flag_on:
+            refusal, capture_key = await _check_capture(request, robot, now)
+            if refusal is not None:
+                return refusal
+
         for stale_token, entry in list(free_leases.items()):
             if entry.exp <= now:
                 del free_leases[stale_token]
@@ -858,6 +960,20 @@ def register_ws_proxy(
                 },
             )
 
+        if capture_key is not None:
+            # Recorded before the token is handed out: if the write fails, the hold is
+            # given back and the capture stays unused, rather than a ride nobody logged.
+            try:
+                rides.record(*capture_key, exp)
+            except Exception:
+                logger.exception("capture flag: could not record the ride")
+                registry.release(robot, holder)
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "couldn't record your ride, try again — your capture was not used"
+                    },
+                )
         free_leases[token] = FreeLease(lease_id=lease_id, robot=robot, exp=exp)
         return {"token": token, "lease": lease_id, "robot": robot, "exp": exp}
 

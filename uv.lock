@@ -1409,8 +1409,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'win32'" },
-    { name = "jeepney", marker = "sys_platform != 'win32'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
@@ -1659,6 +1659,11 @@ all = [
     { name = "numpy" },
     { name = "pillow" },
 ]
+capture-flag = [
+    { name = "eth-hash", extra = ["pycryptodome"] },
+    { name = "eth-keys" },
+    { name = "httpx" },
+]
 dev = [
     { name = "eth-hash", extra = ["pycryptodome"] },
     { name = "eth-keys" },
@@ -1705,14 +1710,17 @@ requires-dist = [
     { name = "djitellopy", marker = "extra == 'all'", specifier = ">=2.5.0" },
     { name = "djitellopy", marker = "extra == 'tello'", specifier = ">=2.5.0" },
     { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'all'", specifier = ">=0.7" },
+    { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'capture-flag'", specifier = ">=0.7" },
     { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'payments'", specifier = ">=0.7" },
     { name = "eth-keys", marker = "extra == 'all'", specifier = ">=0.7" },
+    { name = "eth-keys", marker = "extra == 'capture-flag'", specifier = ">=0.7" },
     { name = "eth-keys", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "eth-keys", marker = "extra == 'payments'", specifier = ">=0.7" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "fastmcp", specifier = ">=2.14.5" },
     { name = "httpx", marker = "extra == 'all'", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'capture-flag'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'fakerobot'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'fakerobot-picar'", specifier = ">=0.28.1" },
@@ -1736,4 +1744,4 @@ requires-dist = [
     { name = "yakrobot-descriptor", extras = ["model"], marker = "extra == 'dev'", git = "https://github.com/pi-drg/yakrobot-descriptor?tag=v0.1.0" },
     { name = "yakrobot-descriptor", extras = ["model"], marker = "extra == 'export'", git = "https://github.com/pi-drg/yakrobot-descriptor?tag=v0.1.0" },
 ]
-provides-extras = ["tumbller", "picar-freenove", "picar-adeept", "tello", "fakerobot", "fakerobot-picar", "export", "payments", "stripe", "all", "dev"]
+provides-extras = ["tumbller", "picar-freenove", "picar-adeept", "tello", "fakerobot", "fakerobot-picar", "export", "payments", "capture-flag", "stripe", "all", "dev"]

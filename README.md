@@ -2,8 +2,8 @@
 
 Robot **controller**. Serves per-robot MCP control endpoints, a browser driving
 console, local fleet discovery, and a generic per-robot reservation (who's in
-control), behind a single port and one ngrok tunnel. **Contains no blockchain
-code** — on-chain discovery and attestation reads live in the separate
+control), behind a single port and one ngrok tunnel. **Holds no keys and sends no
+transactions** (its one chain read is capture-flag mode's `eth_call`) — on-chain discovery and attestation reads live in the separate
 [`yakrobot-identity`](https://github.com/pi-drg/yakrobot-identity) layer, and
 registration is signed by a browser wallet outside both. **Task auctions /
 marketplace** live in the separate `yakrobot-marketplace` service, which reaches
@@ -140,6 +140,46 @@ watch). Video is the expensive half of the link — the console can turn it off
 per operator, and `VIDEO_ENABLED=0` refuses it gateway-wide, leaving the car
 drivable but blind.
 
+## Running a robot in the capture-flag game
+
+[`capture-flag.yakrobot.com`](https://capture-flag.yakrobot.com) lists robots that anyone
+can drive for free after one wallet signature (a "capture", recorded on Base; the game
+pays the gas). To add your robot:
+
+1. **Get a fixed public hostname**: an ngrok reserved domain (`NGROK_DOMAIN`) or a named
+   Cloudflare tunnel (`CLOUDFLARE_TUNNEL_TOKEN` + `CLOUDFLARE_DOMAIN`). The robot's
+   on-chain id is `keccak256(host + "/" + robot)`, so a new hostname is a new robot: its
+   capture counts and leader start again from zero. A random ngrok URL won't work.
+2. **Send the game owner** that hostname and the robot name (e.g. `picar_freenove`). They
+   add it to the game's robot list; you need nothing from them in return.
+3. **Configure** (see `.env.example`), with both paid gates off:
+
+   ```bash
+   TELEOP_CAPTURE_FLAG_ENABLED=1
+   TELEOP_CAPTURE_FLAG_CONTRACT=0xF3F2e69A1b00577d5d6ca1911a3a80132CD08737
+   TELEOP_CAPTURE_FLAG_CHAIN_ID=84532
+   TELEOP_CAPTURE_FLAG_RPC_URL=https://sepolia.base.org
+   TELEOP_CAPTURE_FLAG_CLAIM_URL=https://capture-flag.yakrobot.com/r/<slug>
+   TELEOP_LEASE_MINUTES=5
+   ```
+
+   and `uv sync --extra capture-flag` plus your robot's extra.
+4. **Start the gateway whenever you like.** While it's up, the robot shows as free on the
+   index page; while it's down, it shows offline. Nothing else to do.
+5. **Restarts are fine:** the gateway remembers which captures have already ridden in
+   `~/.local/state/yakrobot-gateway/capture-flag-rides.sqlite3` (or
+   `TELEOP_CAPTURE_FLAG_STATE_FILE`), so rebooting the Pi doesn't give anyone a second
+   ride.
+
+The gateway holds no key and never sends a transaction. It checks the player's signature
+locally and reads the contract once per ride; if the RPC is down, no new rides start.
+
+The Freenove console uses its measured drive power (1200 times the slider).
+An ordinary-wheel pivot asks for the robot's full duty allowance at 80% speed
+and above, bounded at 2400; below 80%, the slider scales the pivot down. Raise
+`control_max_duty` in the unit's `/etc/yakrobot/unit.json` only after checking
+the car on the floor. The Adeept retains its higher drive and turn profile.
+
 ## End-to-end flow
 
 [`yakrobot-descriptor`](https://github.com/pi-drg/yakrobot-descriptor) is the seam
@@ -184,7 +224,7 @@ Steps 3–4 are signed transactions and are made from a browser wallet — no re
 key for them. Step 5 runs from
 [`yakrobot-identity`](https://github.com/pi-drg/yakrobot-identity), which is read-only.
 This gateway owns steps 1–2 only: it serves robots and exports their descriptors, and
-holds no chain code.
+holds no keys.
 
 ## Environment
 
@@ -196,6 +236,7 @@ Optional: `TUMBLLER_URL`, `TELLO_HOST`, `FAKEROBOT_URL`, `FAKEROBOT_PICAR_URL`.
 first that answers wins; `PICAR_FREENOVE_TOKEN` only if the car runs with auth on.
 `PICAR_ADEEPT_URL` / `PICAR_ADEEPT_TOKEN` are the same pair for the Adeept car.
 Teleop: `VIDEO_ENABLED=0` refuses `/ws/video` for every client.
+Capture-flag game: `TELEOP_CAPTURE_FLAG_*` (above and `.env.example`).
 No chain secrets live in any of these repos: registration and attestation are signed by a
 browser wallet, and `yakrobot-identity` is read-only. Payment/marketplace secrets live in
 `yakrobot-marketplace` — not here.

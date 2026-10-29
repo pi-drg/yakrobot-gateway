@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Drive picar-finland-01</title>
+<title>Robot driving console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
@@ -158,6 +158,7 @@
   .paywall-reason { color: var(--accent); font-size: 13px; margin: 0 0 10px; }
   .paywall-price { color: var(--ink-secondary); font-size: 15px; margin: 0 0 18px; }
   .paywall-card a.stop { display: inline-flex; text-decoration: none; }
+  .paywall-card a.stop[hidden] { display: none; }
   .paywall-card a.stop[aria-disabled="true"] {
     background: var(--surface-muted); color: var(--ink-secondary); cursor: not-allowed;
     pointer-events: none;
@@ -430,7 +431,7 @@
 
 <header>
   <div class="ident">
-    <span class="name" id="unit">picar-finland-01</span>
+    <span class="name" id="unit">this robot</span>
     <span class="build" id="build">connecting</span>
   </div>
 
@@ -506,7 +507,8 @@
       <label class="label" for="speed">Speed limit</label>
       <span class="val num"><b id="speedVal">80</b><i>%</i></span>
       <input id="speed" type="range" min="10" max="100" step="5" value="80" />
-      <p class="hint">Server clamps every duty to <b class="num" id="maxDuty">—</b>.</p>
+      <p class="hint">Server clamps every duty to <b class="num" id="maxDuty">—</b>.
+        Sets driving speed. Freenove pivots reach their cap at 80% and above.</p>
     </div>
 
     <button class="ghost" id="padBtn" type="button">Touch controls</button>
@@ -568,7 +570,7 @@
 
 <dialog id="help">
   <div class="body">
-    <h2>Driving picar-finland-01</h2>
+    <h2>Driving this robot</h2>
     <p class="lede">The car stops itself when it stops hearing from you. Release
       every key and it halts within the deadman window.</p>
     <table>
@@ -590,6 +592,9 @@
         Chromium is the safer browser for driving.</li>
       <li><b>Switching tabs stops the car.</b> Losing focus clears every held key
         and sends a stop.</li>
+      <li><b>Freenove turns ask for full power.</b> Pivoting has to break four
+        tyres loose at once, so <kbd>A</kbd>/<kbd>D</kbd> reach the car's duty
+        allowance at 80% speed and above. Lower settings may stall on carpet.</li>
       <li><b>One driver at a time.</b> A second browser sees the video but cannot
         steer.</li>
     </ul>
@@ -640,6 +645,32 @@
   const rtts = [];                          // null entries are missed pongs
   let pan = 90, tilt = 90, lastSent = null;
 
+  // ---- naming -------------------------------------------------------------
+  // One file serves every robot, so the labels start out generic and this reads
+  // the robot's own name from its descriptor — public, CORS-open, and served by
+  // the gateway a few feet away rather than the robot across the link. When the
+  // page is served by a robot directly there is no gateway index to name it from
+  // and the generic labels stand, which is honest rather than wrong.
+  async function applyRobotName() {
+    if (!robotName) return;
+    try {
+      const res = await fetch(`/${robotName}/descriptor`, {
+        headers: { "ngrok-skip-browser-warning": "1" },
+      });
+      if (!res.ok) return;
+      const { name } = await res.json();
+      if (!name) return;
+      document.title = `Drive ${name}`;
+      const unit = $("unit");
+      if (unit) unit.textContent = name;
+      const help = document.querySelector("#help h2");
+      if (help) help.textContent = `Driving ${name}`;
+    } catch (err) {
+      // A console that cannot read its own name is still a working console.
+    }
+  }
+  applyRobotName();
+
   // ---- key state ----------------------------------------------------------
   const KEYS = ["w","a","s","d","q","e","z","c"];
   const held = new Set();
@@ -682,16 +713,21 @@
   function derive() {
     const on = intents();
     let vx = 0, vy = 0, om = 0;
-    // Full-slider duties. Sized for the Adeept AWR (2026-10-25): it struggled on
-    // carpet, so straight runs use the motor maximum (that car's unit.json raises
-    // its max_duty to 4095) and spins 3000 — twitchy on a hard floor, where the
-    // speed slider takes them down. A robot's max_duty still caps them.
-    if (on.has("fwd")) vx += 4095;
-    if (on.has("back")) vx -= 4095;
+    // Keep the Freenove's measured 1200 straight duty. The Adeept AWR uses
+    // 4095 at full slider on carpet; each robot's max_duty still caps it.
+    const forwardDuty = robotName === "picar_freenove" ? 1200 : 4095;
+    if (on.has("fwd")) vx += forwardDuty;
+    if (on.has("back")) vx -= forwardDuty;
     if (on.has("strafeL")) vy += 1400;
     if (on.has("strafeR")) vy -= 1400;
-    if (on.has("spinL")) om += 3000;
-    if (on.has("spinR")) om -= 3000;
+    // Freenove pivots need the robot's full allowance on carpet. Preserve the
+    // Adeept's higher measured turn power and the mecanum turn profile.
+    const TURN_DUTY_CEILING = 2400, TURN_FULL_PCT = 80;
+    const turnDuty = cfg.holonomic ? 900
+      : robotName === "picar_freenove" ? Math.min(cfg.maxDuty, TURN_DUTY_CEILING)
+      : 3000;
+    if (on.has("spinL")) om += turnDuty;
+    if (on.has("spinR")) om -= turnDuty;
     if (on.has("diagFL")) { vx += 1000; vy += 1000; }
     if (on.has("diagFR")) { vx += 1000; vy -= 1000; }
     if (on.has("diagBL")) { vx -= 1000; vy += 1000; }
@@ -699,11 +735,17 @@
     if (!cfg.holonomic) vy = 0;              // ordinary wheels cannot strafe
 
     const scale = Number(els.speed.value) / 100;
+    // The slider still slows a pivot down, but only below the default setting:
+    // above TURN_FULL_PCT there is nothing left to give, and a pivot that is
+    // starved of torque is not a gentler turn, it is a stalled car.
+    const turnScale = robotName === "picar_freenove" && !cfg.holonomic
+      ? Math.min(1, scale / (TURN_FULL_PCT / 100))
+      : scale;
     const cap = cfg.maxDuty;
     return {
       vx: clamp(Math.round(vx * scale), -cap, cap),
       vy: clamp(Math.round(vy * scale), -cap, cap),
-      omega: clamp(Math.round(om * scale), -cap, cap),
+      omega: clamp(Math.round(om * turnScale), -cap, cap),
     };
   }
 
@@ -851,6 +893,16 @@
   // on the tab staying open, so closing and reopening the console shouldn't make a
   // driver look like a stranger to their own reservation.
   const FREE_STORAGE_KEY = robotName ? "yakrobot.freelease." + robotName : null;
+  // Capture-flag mode: the visitor's signed capture {c, s, k, at}, handed off from the
+  // capture-flag page in the URL hash. localStorage, like a free lease: it's proof of a
+  // capture the visitor already made, good for VALID_MINUTES, and a reload or a busy
+  // robot must not make them capture again. `k` is the ride secret: the signed nonce is
+  // sha256(k), and k is never on-chain, so it is what makes this capture theirs.
+  const CAPTURE_STORAGE_KEY = robotName ? "yakrobot.capture." + robotName : null;
+  // How long the console keeps retrying a busy robot with a saved capture; the gateway
+  // has the real rule (TELEOP_CAPTURE_FLAG_VALID_MINUTES) and refuses past it.
+  const CAPTURE_RETRY_MS = 30 * 60 * 1000;
+  const isFreeLike = r => r === "free" || r === "capture_flag";
 
   // Teleop-gate decisions, logged so a stuck paywall can be diagnosed from DevTools
   // (with "Preserve log" on, the trail survives the payment redirect and reloads).
@@ -874,17 +926,23 @@
   let paywalled = false;
   let refused = false;     // idempotent guard: both sockets can 1008 the same reason
   let countdownTimer = null;
+  let captureHandedOff = false;  // this load arrived from the capture-flag page
+  let captureRetryTimer = null;
+
+  // Unpadded base64url → JSON, as both lease tokens and the capture hand-off carry it.
+  function decodeB64urlJson(text) {
+    let b64 = text.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
 
   // Decode only — verification is the gateway's job (core/capability.py). Null on
   // any malformed token or one already expired, so the caller can tell "no usable
   // capability" from "a broken one" without repeating this parsing.
   function decodeCapabilityToken(token) {
     try {
-      const payload = token.split(".")[0];
-      let b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
-      while (b64.length % 4) b64 += "=";
-      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-      const claims = JSON.parse(new TextDecoder().decode(bytes));
+      const claims = decodeB64urlJson(token.split(".")[0]);
       if (typeof claims.lease !== "string" || typeof claims.exp !== "number") return null;
       if (claims.exp * 1000 <= Date.now()) return null;
       return claims;
@@ -902,6 +960,16 @@
     return { token: stored, claims };
   }
 
+  function loadStoredCapture() {
+    if (!CAPTURE_STORAGE_KEY) return null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(CAPTURE_STORAGE_KEY) || "null");
+      if (saved && saved.c && saved.s && saved.k && Date.now() - saved.at < CAPTURE_RETRY_MS) return saved;
+    } catch {}
+    localStorage.removeItem(CAPTURE_STORAGE_KEY);
+    return null;
+  }
+
   function loadStoredFreeLease() {
     if (!FREE_STORAGE_KEY) return null;
     const stored = localStorage.getItem(FREE_STORAGE_KEY);
@@ -916,14 +984,14 @@
   const BLOCK_EXPLORERS = { 84532: "https://sepolia.basescan.org", 8453: "https://basescan.org" };
   const TX_STORAGE_KEY = robotName ? "yakrobot.tx." + robotName : null;
 
-  function renderTxLink(tx, chainId) {
+  function renderTxLink(tx, chainId, label = "Payment") {
     const base = BLOCK_EXPLORERS[chainId];
     if (!tx || !base) { els.txLink.hidden = true; return; }
     els.txLink.href = `${base}/tx/${tx}`;
     els.txLink.target = "_blank";
     els.txLink.rel = "noopener";
     els.txLink.title = tx;
-    els.txLinkAnchor.textContent = `Payment ${tx.slice(0, 6)}…${tx.slice(-4)} ↗`;
+    els.txLinkAnchor.textContent = `${label} ${tx.slice(0, 6)}…${tx.slice(-4)} ↗`;
     els.txLink.hidden = false;
   }
 
@@ -934,6 +1002,26 @@
   if (!staticToken) {
     const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
     const hashToken = hashParams.get("token");
+    // Capture-flag hand-off: #c=<b64url typedData>&s=<sig>&k=<ride secret>&tx=<capture tx>.
+    const hashCapture = hashParams.get("c");
+    if (hashCapture && hashParams.get("s") && hashParams.get("k") && CAPTURE_STORAGE_KEY) {
+      try {
+        const c = decodeB64urlJson(hashCapture);
+        localStorage.setItem(CAPTURE_STORAGE_KEY, JSON.stringify({
+          c, s: hashParams.get("s"), k: hashParams.get("k"), at: Date.now(),
+        }));
+        const tx = hashParams.get("tx");
+        if (tx && TX_STORAGE_KEY) {
+          sessionStorage.setItem(TX_STORAGE_KEY, JSON.stringify({ tx, chainId: Number(c?.domain?.chainId), label: "Capture" }));
+        }
+        // A new capture replaces any lease left from an earlier ride.
+        localStorage.removeItem(FREE_STORAGE_KEY);
+        captureHandedOff = true;
+      } catch {
+        teleopLog("capture hand-off unreadable");
+      }
+      history.replaceState(null, "", location.pathname + location.search);
+    }
     if (hashToken) {
       if (STORAGE_KEY) sessionStorage.setItem(STORAGE_KEY, hashToken);
       const tx = hashParams.get("tx"), chainId = Number(hashParams.get("chain"));
@@ -957,7 +1045,7 @@
     if (TX_STORAGE_KEY) {
       try {
         const stored = JSON.parse(sessionStorage.getItem(TX_STORAGE_KEY) || "null");
-        if (stored) renderTxLink(stored.tx, stored.chainId);
+        if (stored) renderTxLink(stored.tx, stored.chainId, stored.label);
       } catch {
         sessionStorage.removeItem(TX_STORAGE_KEY);
       }
@@ -1000,7 +1088,8 @@
     // self-exclusion check: any reservation at all means someone else has it.
     const reservation = latestIndex?.robots?.[robotName]?.reservation;
     const heldByOther = !!reservation?.reserved;
-    const isFree = teleop.reservation === "free";
+    const isFree = isFreeLike(teleop.reservation);
+    const isCapture = teleop.reservation === "capture_flag";
 
     const priceParts = [];
     if (payments.teleop) priceParts.push(`${payments.teleop.price_usdc} USDC`);
@@ -1010,19 +1099,39 @@
       priceParts.push(`${label} by card`);
     }
 
-    els.paywallHeading.textContent = isFree ? "Reserve to drive" : "Pay to drive";
-    els.paywallPrice.textContent = isFree
+    els.paywallHeading.textContent = isCapture
+      ? "Capture to drive"
+      : isFree ? "Reserve to drive" : "Pay to drive";
+    els.paywallPrice.textContent = isCapture
+      ? (teleop.lease_minutes ? `Free — one ${teleop.lease_minutes} min ride per capture` : "")
+      : isFree
       ? (teleop.lease_minutes ? `Free — ${teleop.lease_minutes} min per turn` : "")
       : priceParts.length
       ? `${priceParts.join(" · ")} for ${teleop.lease_minutes ?? "?"} min`
       : "";
+
+    if (isCapture && !loadStoredCapture()) {
+      // Nothing to drive with yet: the capture happens on the capture-flag page.
+      if (teleop.claim_url) {
+        els.paywallLink.href = teleop.claim_url;
+        els.paywallLink.removeAttribute("aria-disabled");
+      } else {
+        els.paywallLink.removeAttribute("href");
+        els.paywallLink.setAttribute("aria-disabled", "true");
+      }
+      els.paywallLink.textContent = "Capture this robot first";
+      els.paywallCardLink.hidden = true;
+      return;
+    }
 
     if (isFree) {
       // No href here — the click handler below does a plain fetch, there is no
       // third-party page to navigate to.
       els.paywallLink.removeAttribute("href");
       if (online && !heldByOther) {
-        els.paywallLink.textContent = `Reserve for ${teleop.lease_minutes ?? "?"} min`;
+        els.paywallLink.textContent = isCapture
+          ? `Drive now (${teleop.lease_minutes ?? "?"} min)`
+          : `Reserve for ${teleop.lease_minutes ?? "?"} min`;
         els.paywallLink.removeAttribute("aria-disabled");
       } else {
         els.paywallLink.textContent = !online ? "Robot is offline" : "Robot is in use";
@@ -1169,9 +1278,14 @@
     // whatever token is on hand — today's behaviour — rather than guessing at a
     // dead screen; if a gate really is on, the server's own 1008 refusal reaches
     // the same paywall via onLeaseRefused.
-    const gated = payments.enabled || stripe.enabled || teleop.reservation === "free";
+    const gated = payments.enabled || stripe.enabled || isFreeLike(teleop.reservation);
     teleopLog("bootstrap", { indexLoaded: !!index, gated, staticToken: !!staticToken, hasCapability: !!capability });
-    if (index && gated && !staticToken && !capability) {
+    if (index && teleop.reservation === "capture_flag" && !staticToken && !capability
+        && (captureHandedOff || loadStoredCapture())) {
+      // Straight from the capture page, or back with a saved capture: drive with it.
+      showPaywall(null);
+      reserveAndConnect();
+    } else if (index && gated && !staticToken && !capability) {
       showPaywall(null);
     } else {
       hidePaywall();
@@ -1186,17 +1300,40 @@
   // Grants a free, timed turn — no payment, no third-party page. Mirrors what the
   // paid path's redirect does after settlement: store the token, admit both sockets.
   async function reserveAndConnect() {
+    if (captureRetryTimer) { clearTimeout(captureRetryTimer); captureRetryTimer = null; }
+    const isCapture = teleop.reservation === "capture_flag";
+    const saved = isCapture ? loadStoredCapture() : null;
+    if (isCapture && !saved) { showPaywall(null); return; }
+
     els.paywallLink.setAttribute("aria-disabled", "true");
     const previousText = els.paywallLink.textContent;
     els.paywallLink.textContent = "Reserving…";
     let body = null;
     try {
-      const res = await fetch(base + "/lease/reserve", { method: "POST" });
+      const init = { method: "POST" };
+      if (saved) {
+        init.headers = { "content-type": "application/json" };
+        init.body = JSON.stringify({ c: saved.c, s: saved.s, k: saved.k });
+      }
+      const res = await fetch(base + "/lease/reserve", init);
       body = await res.json().catch(() => null);
       if (!res.ok) {
         if (body?.reservation) paintReservationBanner(body.reservation);
         els.paywallReason.hidden = false;
         els.paywallReason.textContent = body?.detail || "could not reserve";
+        if (isCapture && res.status === 409) {
+          // Someone else is driving. The capture wasn't used, so wait and try again.
+          const freeAt = Date.now() + (body?.reservation?.expires_in ?? 15) * 1000;
+          const when = new Date(freeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          els.paywallReason.textContent = `Someone else is driving until about ${when}. Your capture is saved; trying again every 15 s.`;
+          captureRetryTimer = setTimeout(reserveAndConnect, 15000);
+        } else if (isCapture && res.status === 403) {
+          // Spent or too old: this capture won't work again. Back to the claim page.
+          localStorage.removeItem(CAPTURE_STORAGE_KEY);
+          showPaywall(body?.detail || "capture this robot again");
+        } else if (isCapture && res.status === 503) {
+          captureRetryTimer = setTimeout(reserveAndConnect, 15000);
+        }
         return;
       }
     } catch {
@@ -1221,7 +1358,8 @@
 
   els.paywallLink.addEventListener("click", e => {
     if (els.paywallLink.getAttribute("aria-disabled") === "true") { e.preventDefault(); return; }
-    if (teleop.reservation === "free") {
+    // In capture-flag mode with no saved capture, the link is the claim page: let it navigate.
+    if (teleop.reservation === "free" || (teleop.reservation === "capture_flag" && loadStoredCapture())) {
       e.preventDefault();
       reserveAndConnect();
     }

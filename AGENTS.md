@@ -25,9 +25,10 @@ chain) via the `/fleet/mcp` `list_connected` tool.
 Robot **controller**: per-robot MCP control + a browser driving console + local fleet
 discovery + a generic per-robot reservation. Plugin-based so any robot is added with
 minimal glue. Two ways in, one gateway: agents drive over MCP, humans drive from the
-console — both reach the same robot. **No
-blockchain code** — on-chain discovery and attestation reads are delegated to the sibling
-`yakrobot-identity` package, and registration is signed by a browser wallet outside both.
+console — both reach the same robot. **No keys and no transactions** — on-chain
+discovery and attestation reads are delegated to the sibling `yakrobot-identity` package,
+and registration is signed by a browser wallet outside both. The one chain read here is
+capture-flag mode's `eth_call` (below).
 **Task auctions / marketplace** were extracted to
 the sibling `yakrobot-marketplace` service, which reaches robots over MCP.
 
@@ -215,6 +216,8 @@ Serving:
 - Task auctions live in `yakrobot-marketplace`. Card-paid teleop is gated here, against
   the operator's own Stripe account (below).
 - **Teleop admission is always gated one of two ways — paid or free — never neither.**
+  `GET /` reports which as `teleop.reservation`: `paid` (x402, Stripe or both), `free`,
+  or `capture_flag` (free with a capture required).
   Paid means an x402 capability, a card-paid (Stripe) lease, or both; free is on only
   when neither paid gate is enabled. `PAYMENTS_ENABLED` and `STRIPE_GATE_ENABLED` (both
   `0`/`1`, default `0`) pick which. There is no separate free-mode toggle and no
@@ -255,6 +258,21 @@ Serving:
     `POST /{robot}/lease/release` frees it early. No signature, no external service —
     the token is only meaningful to this gateway's own memory, so a restart forgets
     every open reservation.
+  - **Capture-flag teleop** (`TELEOP_CAPTURE_FLAG_ENABLED=1`, needs free mode and
+    `uv sync --extra capture-flag`): free reservations, but `/{robot}/lease/reserve`
+    first needs a recent capture of this robot in the `CaptureFlag` contract
+    (`yakrobot-capture-flag`). The console gets the capture's EIP-712 typed data,
+    signature and ride secret `k` in its `#c&s&k&tx` fragment. The gateway checks the
+    signature and `sha256(k) == nonce` locally, then makes one read-only `eth_call` of
+    `lastCapture(robotId, player)` (5 s timeout). RPC down = 503, so no new rides start;
+    rides in progress go on. `robotId = keccak256(host + "/" + robot)`, where the host
+    comes only from `NGROK_DOMAIN`/`CLOUDFLARE_DOMAIN` (required here), never from the
+    `Host` header. Vars: `TELEOP_CAPTURE_FLAG_CONTRACT`, `_CHAIN_ID` (84532 or 8453),
+    `_RPC_URL` (never logged), `_VALID_MINUTES` (default 30), `_CLAIM_URL`,
+    `_STATE_FILE`. A capture rides once, across restarts: used captures are kept in a
+    SQLite file (`core/capture_rides.py`), by default
+    `~/.local/state/yakrobot-gateway/capture-flag-rides.sqlite3`; the gateway won't start
+    if it can't open it.
 
   All validated at startup and reported on the `/` index (`core.payments_config`).
   Full rules: `plans/paid-teleop-execution.md` §0.1 in the `pi-drg` planning repo.
@@ -262,9 +280,11 @@ Serving:
 There are **no chain secrets** in this repo or in `yakrobot-identity`: registration and
 attestation are signed by a browser wallet, and the identity package is read-only. If a
 task seems to need `SIGNER_PVT_KEY` or `PINATA_JWT` here, it is in the wrong repo. The
-`payments` extra is the one exception worth naming explicitly: it adds `eth-keys` solely
+`payments` extra is one exception worth naming explicitly: it adds `eth-keys` solely
 to recover the signer of a paid-teleop capability and compare it to `PAYMENTS_ISSUER` — no
-RPC, no provider, no private key, so it does not violate the rule above.
+RPC, no provider, no private key, so it does not violate the rule above. The
+`capture-flag` extra is the other: the same signer recovery, plus `httpx` for one
+read-only `eth_call`. No private key, no signing, no transaction.
 
 **Operator setup (card):**
 1. Create or choose a Stripe account.
@@ -281,7 +301,9 @@ RPC, no provider, no private key, so it does not violate the rule above.
 - Robot adapter code is fully self-contained; do not put robot-specific logic in `src/core/`
 - Add robot-specific dependencies as optional extras in `pyproject.toml`
 - No framework code changes should be needed to add a new robot
-- This repo holds **no chain code**: on-chain concerns belong in `yakrobot-identity`.
+- **Read-only chain calls are allowed; never private keys or transaction signing.**
+  Other on-chain concerns belong in `yakrobot-identity`. A chain read must fail closed
+  (503, no new rides), never fail open.
   The `stripe` extra is plain HTTPS to Stripe — no chain, no RPC, no key material.
 - **Leave `fleet_provider` and `fleet_domain` empty in a plugin's `metadata()`.** A gateway
   cannot verify whose fleet it belongs to, so filling them in would put an unverified claim

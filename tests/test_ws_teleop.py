@@ -25,6 +25,7 @@ if str(SRC) not in sys.path:
 
 from capability_helper import mint  # noqa: E402
 from tools.fake_stripe import StripeState, create_fake_stripe, paid_session  # noqa: E402
+from tools.fake_rpc import RpcState, create_fake_rpc  # noqa: E402
 
 SIM_PORT, GW_PORT = 8191, 8192
 
@@ -102,6 +103,10 @@ _CLEARED_ENV_VARS = (
     "STRIPE_GATE_ENABLED", "STRIPE_SECRET_KEY", "STRIPE_PRICE_CENTS",
     "STRIPE_CURRENCY", "STRIPE_API_BASE",
     "STRIPE_AUTOMATIC_TAX", "STRIPE_TAX_CODE",
+    "TELEOP_CAPTURE_FLAG_ENABLED", "TELEOP_CAPTURE_FLAG_CONTRACT",
+    "TELEOP_CAPTURE_FLAG_CHAIN_ID", "TELEOP_CAPTURE_FLAG_RPC_URL",
+    "TELEOP_CAPTURE_FLAG_VALID_MINUTES", "TELEOP_CAPTURE_FLAG_CLAIM_URL",
+    "TELEOP_CAPTURE_FLAG_STATE_FILE",
 )
 
 
@@ -1650,5 +1655,351 @@ def test_index_reports_stripe():
                     "lease_minutes": 5,
                 }
                 assert body["teleop"]["reservation"] == "paid"
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------
+# Capture-flag mode — free reservations that need a recent on-chain capture.
+# --------------------------------------------------------------------------
+
+CF_CONTRACT = "0xf3f2e69a1b00577d5d6ca1911a3a80132cd08737"
+CF_CLAIM_URL = "https://capture-flag.test/r/india"
+CF_PUBLIC_HOST = "robot.example.ngrok.app"
+RESERVE_URL = f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/reserve"
+RELEASE_URL = f"http://127.0.0.1:{GW_PORT}/fakerobot_picar/lease/release"
+
+
+class _FakeRpcNode:
+    """Serve the fake JSON-RPC node on GW_PORT + 30 and expose its state."""
+
+    def __init__(self):
+        import tempfile
+
+        self.port = GW_PORT + 30
+        self.state = RpcState(contract=CF_CONTRACT)
+        # One ride ledger per node, so every test starts with no captures used, and a
+        # test that restarts the gateway with the same env keeps them.
+        self.rides = os.path.join(tempfile.mkdtemp(prefix="capture-rides-"), "rides.sqlite3")
+
+    async def __aenter__(self):
+        self._server, self._task = await _serve(create_fake_rpc(self.state), self.port)
+        return self
+
+    async def __aexit__(self, *exc):
+        self._server.should_exit = True
+        await self._task
+
+    def env(self, **overrides) -> dict[str, str]:
+        env = _free_env(
+            TELEOP_CAPTURE_FLAG_ENABLED="1",
+            TELEOP_CAPTURE_FLAG_CONTRACT=CF_CONTRACT,
+            TELEOP_CAPTURE_FLAG_CHAIN_ID="84532",
+            TELEOP_CAPTURE_FLAG_RPC_URL=f"http://127.0.0.1:{self.port}/",
+            TELEOP_CAPTURE_FLAG_CLAIM_URL=CF_CLAIM_URL,
+            TELEOP_CAPTURE_FLAG_STATE_FILE=self.rides,
+            NGROK_DOMAIN=CF_PUBLIC_HOST,
+        )
+        env.update(overrides)
+        return env
+
+
+class _Player:
+    """A fresh wallet that signs ``Capture``s, as the capture-flag page has it do."""
+
+    def __init__(self):
+        from eth_keys import keys
+
+        self.key = keys.PrivateKey(os.urandom(32))
+        self.address = self.key.public_key.to_checksum_address().lower()
+
+    def robot_id(self, host=CF_PUBLIC_HOST, robot="fakerobot_picar") -> str:
+        from core.eth_sig import robot_id_for
+
+        return robot_id_for(host, robot)
+
+    def capture(self, *, robot_id=None, chain_id=84532, contract=CF_CONTRACT, signer=None) -> dict:
+        """The ``{c, s, k}`` body the console posts, ``c`` as ``eth_signTypedData_v4`` got
+        it, signed over ``nonce = sha256(k)`` as the capture-flag page does."""
+        import hashlib
+
+        from core.eth_sig import CAPTURE_TYPES, capture_digest
+
+        k = os.urandom(32)
+        typed = {
+            "types": CAPTURE_TYPES,
+            "primaryType": "Capture",
+            "domain": {
+                "name": "yakrobot-capture-flag",
+                "version": "1",
+                "chainId": chain_id,
+                "verifyingContract": contract,
+            },
+            "message": {
+                "robotId": robot_id or self.robot_id(),
+                "player": self.address,
+                "nonce": str(int.from_bytes(hashlib.sha256(k).digest(), "big")),
+                "deadline": str(int(time.time()) + 300),
+            },
+        }
+        signed = (signer or self.key).sign_msg_hash(capture_digest(typed)).to_bytes()
+        return {
+            "c": typed,
+            "s": "0x" + (signed[:64] + bytes([signed[64] + 27])).hex(),
+            "k": "0x" + k.hex(),
+        }
+
+    def captured(self, rpc: _FakeRpcNode, ago_s: int = 60) -> None:
+        """Record this player's capture of the robot on the fake chain, ``ago_s`` ago."""
+        rpc.state.captures[(self.robot_id(), self.address)] = int(time.time()) - ago_s
+
+
+async def _reserved(client) -> bool:
+    r = await client.get(f"http://127.0.0.1:{GW_PORT}/")
+    return r.json()["robots"]["fakerobot_picar"]["reservation"]["reserved"]
+
+
+def test_capture_flag_reserve_then_drive():
+    async def run():
+        import httpx
+        from websockets.asyncio.client import connect
+
+        async with _FakeRpcNode() as rpc, _Stack(env=rpc.env()) as stack:
+            player = _Player()
+            player.captured(rpc)
+            async with httpx.AsyncClient() as client:
+                index = (await client.get(f"http://127.0.0.1:{GW_PORT}/")).json()
+                assert index["teleop"] == {
+                    "reservation": "capture_flag",
+                    "lease_minutes": 5,
+                    "contract": CF_CONTRACT,
+                    "chain_id": 84532,
+                    "claim_url": CF_CLAIM_URL,
+                }
+
+                r = await client.post(RESERVE_URL, json=player.capture())
+                assert r.status_code == 200, r.text
+                token = r.json()["token"]
+                # The token is an ordinary free lease: the existing socket branch admits it.
+                async with connect(f"{stack.control}?token={token}") as ws:
+                    assert (await _recv_json(ws))["controller"] is True
+                    await ws.send(json.dumps({"type": "drive", "vx": 800}))
+                    await asyncio.sleep(0.2)
+                    assert stack.sim.STATE.vx == 800
+
+    asyncio.run(run())
+
+
+def test_capture_flag_reserve_without_a_capture_is_refused():
+    async def run():
+        import httpx
+
+        async with _FakeRpcNode() as rpc, _Stack(env=rpc.env()):
+            async with httpx.AsyncClient() as client:
+                r = await client.post(RESERVE_URL)
+                assert r.status_code == 403
+                assert r.json()["detail"] == (
+                    f"capture required — capture this robot at {CF_CLAIM_URL}"
+                )
+                assert await _reserved(client) is False
+                assert rpc.state.calls == 0
+
+    asyncio.run(run())
+
+
+def test_capture_flag_bad_captures_are_400_and_change_nothing():
+    async def run():
+        import httpx
+        from eth_keys import keys
+
+        async with _FakeRpcNode() as rpc, _Stack(env=rpc.env()):
+            player = _Player()
+            player.captured(rpc)
+            bad = {
+                "another robot": player.capture(robot_id=player.robot_id(robot="picar_freenove")),
+                "another gateway": player.capture(robot_id=player.robot_id(host="other.example")),
+                # The robot id this gateway would get from the Host header, not its domain.
+                "the request's host": player.capture(robot_id=player.robot_id(host=f"127.0.0.1:{GW_PORT}")),
+                "another chain": player.capture(chain_id=8453),
+                "another contract": player.capture(contract="0x" + "33" * 20),
+                "someone else's signature": player.capture(signer=keys.PrivateKey(os.urandom(32))),
+                "not typed data": {"c": "hello", "s": "0x00", "k": "0x" + "00" * 32},
+            }
+            # What anyone can read from the relayer's transaction: c and s, but not k.
+            seen_on_chain = player.capture()
+            del seen_on_chain["k"]
+            bad["no ride secret"] = seen_on_chain
+            bad["a guessed ride secret"] = {**seen_on_chain, "k": "0x" + "11" * 32}
+            async with httpx.AsyncClient() as client:
+                for name, body in bad.items():
+                    r = await client.post(RESERVE_URL, json=body)
+                    assert r.status_code == 400, (name, r.text)
+                    assert r.json()["detail"].startswith("bad capture"), name
+                r = await client.post(RESERVE_URL, content=b"not json")
+                assert r.status_code == 400
+
+                assert rpc.state.calls == 0
+                assert await _reserved(client) is False
+                # Nothing was used up: the player's real capture still reserves.
+                assert (await client.post(RESERVE_URL, json=player.capture())).status_code == 200
+
+    asyncio.run(run())
+
+
+def test_capture_flag_needs_a_recent_capture():
+    async def run():
+        import httpx
+
+        async with _FakeRpcNode() as rpc, _Stack(env=rpc.env()):
+            never, stale, fresh = _Player(), _Player(), _Player()
+            stale.captured(rpc, ago_s=31 * 60)
+            fresh.captured(rpc, ago_s=29 * 60)
+            async with httpx.AsyncClient() as client:
+                for player in (never, stale):
+                    r = await client.post(RESERVE_URL, json=player.capture())
+                    assert r.status_code == 403
+                    assert r.json()["detail"] == "no recent capture — capture this robot again"
+                assert await _reserved(client) is False
+                assert (await client.post(RESERVE_URL, json=fresh.capture())).status_code == 200
+
+    asyncio.run(run())
+
+
+def test_capture_flag_one_ride_per_capture():
+    async def run():
+        import httpx
+
+        async with _FakeRpcNode() as rpc, _Stack(env=rpc.env()):
+            player = _Player()
+            player.captured(rpc)
+            async with httpx.AsyncClient() as client:
+                first = await client.post(RESERVE_URL, json=player.capture())
+                assert first.status_code == 200
+                await client.post(RELEASE_URL, json={"token": first.json()["token"]})
+                assert await _reserved(client) is False
+
+                # A fresh signature over the same on-chain capture is still the same ride.
+                again = await client.post(RESERVE_URL, json=player.capture())
+                assert again.status_code == 403
+                assert again.json()["detail"] == "this capture was already used"
+
+                # A new capture on-chain is a new ride.
+                player.captured(rpc, ago_s=5)
+                assert (await client.post(RESERVE_URL, json=player.capture())).status_code == 200
+
+    asyncio.run(run())
+
+
+def test_capture_flag_one_ride_per_capture_survives_a_restart():
+    async def run():
+        import httpx
+
+        async with _FakeRpcNode() as rpc:
+            player, other = _Player(), _Player()
+            player.captured(rpc)
+            other.captured(rpc)
+            async with _Stack(env=rpc.env()):
+                async with httpx.AsyncClient() as client:
+                    first = await client.post(RESERVE_URL, json=player.capture())
+                    assert first.status_code == 200
+                    await client.post(RELEASE_URL, json={"token": first.json()["token"]})
+
+            # A friend reboots the Pi: same state file, fresh process memory.
+            async with _Stack(env=rpc.env()):
+                async with httpx.AsyncClient() as client:
+                    again = await client.post(RESERVE_URL, json=player.capture())
+                    assert again.status_code == 403
+                    assert again.json()["detail"] == "this capture was already used"
+                    # A capture that hadn't ridden still can.
+                    assert (await client.post(RESERVE_URL, json=other.capture())).status_code == 200
+
+    asyncio.run(run())
+
+
+def test_capture_flag_unopenable_state_file_stops_startup(tmp_path):
+    import core.server  # noqa: F401  (load .env before clearing, as _Stack does)
+    from core.payments_config import PaymentsConfigError
+    from core.server import create_gateway
+    from yakrobot_cli.commands import _load_plugins
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    env = _FakeRpcNode().env(TELEOP_CAPTURE_FLAG_STATE_FILE=str(blocker / "rides.sqlite3"))
+    _clear_auth_env()
+    os.environ.update(env)
+    try:
+        with pytest.raises(PaymentsConfigError, match="TELEOP_CAPTURE_FLAG_STATE_FILE"):
+            create_gateway(_load_plugins(["fakerobot_picar"]))
+    finally:
+        _clear_auth_env()
+
+
+def test_ride_ledger_prunes_captures_older_than_the_window(tmp_path):
+    from core.capture_rides import RideLedger
+
+    path = str(tmp_path / "rides.sqlite3")
+    ledger = RideLedger(path)
+    ledger.record("r", "0xold", 100, 400)
+    ledger.record("r", "0xnew", 900, 1200)
+    ledger.prune(500)
+    assert not ledger.used("r", "0xold", 100)
+    assert RideLedger(path).used("r", "0xnew", 900)
+
+
+def test_capture_flag_busy_robot_does_not_use_the_capture():
+    async def run():
+        import httpx
+
+        async with _FakeRpcNode() as rpc, _Stack(env=rpc.env()):
+            driving, waiting = _Player(), _Player()
+            driving.captured(rpc)
+            waiting.captured(rpc)
+            async with httpx.AsyncClient() as client:
+                first = await client.post(RESERVE_URL, json=driving.capture())
+                assert first.status_code == 200
+
+                r = await client.post(RESERVE_URL, json=waiting.capture())
+                assert r.status_code == 409
+                assert r.json()["detail"] == "robot is held by another session"
+
+                await client.post(RELEASE_URL, json={"token": first.json()["token"]})
+                assert (await client.post(RESERVE_URL, json=waiting.capture())).status_code == 200
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["http500", "rpc_error", "down"])
+def test_capture_flag_rpc_failure_is_503(mode):
+    async def run():
+        import httpx
+
+        async with _FakeRpcNode() as rpc:
+            env = rpc.env()
+            if mode == "down":
+                env["TELEOP_CAPTURE_FLAG_RPC_URL"] = "http://127.0.0.1:9/"
+            else:
+                rpc.state.mode = mode
+            async with _Stack(env=env):
+                player = _Player()
+                player.captured(rpc)
+                async with httpx.AsyncClient() as client:
+                    r = await client.post(RESERVE_URL, json=player.capture())
+                    assert r.status_code == 503
+                    assert r.json()["detail"] == "capture lookup unavailable, try again shortly"
+                    assert await _reserved(client) is False
+
+    asyncio.run(run())
+
+
+def test_capture_flag_refuses_to_start_beside_a_paid_gate():
+    from core.payments_config import PaymentsConfigError
+
+    async def run():
+        async with _FakeRpcNode() as rpc:
+            _, issuer = _new_issuer()
+            env = {**rpc.env(), **_payments_env(issuer)}
+            with pytest.raises(PaymentsConfigError, match="needs free mode"):
+                async with _Stack(env=env):
+                    pass
 
     asyncio.run(run())
